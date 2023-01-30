@@ -1,0 +1,167 @@
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/NewFunctionStackAnalysisCmd.java b/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/NewFunctionStackAnalysisCmd.java
+index b5111d8a5..32ca704b8 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/NewFunctionStackAnalysisCmd.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/NewFunctionStackAnalysisCmd.java
+@@ -29,6 +29,7 @@ import ghidra.program.model.listing.Function.FunctionUpdateType;
+ import ghidra.program.model.pcode.PcodeOp;
+ import ghidra.program.model.pcode.Varnode;
+ import ghidra.program.model.scalar.Scalar;
++import ghidra.util.SkipManager;
+ import ghidra.program.model.symbol.*;
+ import ghidra.program.util.*;
+ import ghidra.util.Msg;
+@@ -104,24 +105,26 @@ public class NewFunctionStackAnalysisCmd extends BackgroundCommand {
+ 
+ 		monitor.initialize(numAddresses);
+ 		FunctionIterator functions = program.getFunctionManager().getFunctions(entryPoints, true);
++		SkipManager m = SkipManager.getInstance();
+ 		while (functions.hasNext()) {
+ 			if (monitor.isCancelled()) {
+ 				break;
+ 			}
+ 
+ 			Function func = functions.next();
++			boolean shouldSkip = m.shouldSkip(func.getName());
+ 			monitor.setProgress(++count);
+ 
+ 			monitor.setMessage("Stack " + func.getName());
+-
+-			try {
+-				if (!analyzeFunction(func, monitor)) {
+-					setStatusMsg("Function overlaps an existing function body");
++			if(!shouldSkip) {
++				try {
++					if (!analyzeFunction(func, monitor)) {
++						setStatusMsg("Function overlaps an existing function body");
++					}
++				} catch (CancelledException e) {
++					//
+ 				}
+ 			}
+-			catch (CancelledException e) {
+-				//
+-			}
+ 		}
+ 		if (monitor.isCancelled()) {
+ 			setStatusMsg("Function Stack analysis cancelled");
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/disassemble/Disassembler.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/disassemble/Disassembler.java
+index eb957ddd5..6adbd6e9b 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/disassemble/Disassembler.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/disassemble/Disassembler.java
+@@ -28,6 +28,7 @@ import ghidra.program.model.address.*;
+ import ghidra.program.model.lang.*;
+ import ghidra.program.model.lang.InstructionError.InstructionErrorType;
+ import ghidra.program.model.listing.*;
++import ghidra.util.SkipManager;
+ import ghidra.program.model.mem.*;
+ import ghidra.program.model.pcode.PcodeOp;
+ import ghidra.program.model.symbol.FlowType;
+@@ -587,7 +588,6 @@ public class Disassembler implements DisassemblerConflictHandler {
+ 				disassemblerContext.setFutureRegisterValue(startAddr, initialValue);
+ 			}
+ 		}
+-
+ 		while (disassemblerQueue.continueProducingInstructionSets(monitor)) {
+ 
+ 			try {
+@@ -664,11 +664,18 @@ public class Disassembler implements DisassemblerConflictHandler {
+ 		Address fallThruAddr = firstBlock.getStartAddress(); // allow us to enter loop with initial block
+ 
+ 		InstructionBlock nextBlock;
++		SkipManager m = SkipManager.getInstance();
+ 		while ((nextBlock = disassemblerQueue.getNextBlockToBeDisassembled(fallThruAddr,
+ 			programMemBuffer.getMemory(), monitor)) != null) {
+ 
+ 			Address blockAddr = disassemblerQueue.getDisassemblyAddress();
+ 
++			boolean shouldSkip = m.shouldSkip(blockAddr.getOffset());
++			if (shouldSkip) {
++				programMemBuffer.setPosition(blockAddr);
++				fallThruAddr = nextBlock.getFallThrough();
++				continue;
++			}
+ 			if (!disassemblerContext.isFlowActive()) {
+ 				disassemblerContext.flowStart(blockAddr);
+ 			}
+diff --git a/Ghidra/Framework/Utility/src/main/java/ghidra/util/SkipManager.java b/Ghidra/Framework/Utility/src/main/java/ghidra/util/SkipManager.java
+new file mode 100644
+index 000000000..3e1659a11
+--- /dev/null
++++ b/Ghidra/Framework/Utility/src/main/java/ghidra/util/SkipManager.java
+@@ -0,0 +1,49 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.util;
++
++import java.util.ArrayList;
++
++public class SkipManager implements Skipper {
++    ArrayList<Skipper> skippers;
++    private static SkipManager inst;
++    private SkipManager() {
++        this.skippers = new ArrayList<Skipper>();
++    }
++
++    public static SkipManager getInstance() {
++        if(inst == null) {
++            inst = new SkipManager();
++        }
++        return inst;
++    }
++
++    public void registerSkipper(Skipper s) {
++        this.skippers.add(s);
++    }
++
++    @Override
++    public boolean shouldSkip(String functionName) {
++        return this.skippers.stream().anyMatch(skipper -> skipper.shouldSkip(functionName));
++    }
++
++    @Override
++    public boolean shouldSkip(long addr) {
++        return this.skippers.stream().anyMatch(skipper -> skipper.shouldSkip(addr));
++    }
++
++
++}
+diff --git a/Ghidra/Framework/Utility/src/main/java/ghidra/util/Skipper.java b/Ghidra/Framework/Utility/src/main/java/ghidra/util/Skipper.java
+new file mode 100644
+index 000000000..78b38a734
+--- /dev/null
++++ b/Ghidra/Framework/Utility/src/main/java/ghidra/util/Skipper.java
+@@ -0,0 +1,21 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.util;
++
++public interface Skipper {
++    public boolean shouldSkip(String functionName);
++    public boolean shouldSkip(long addr);
++}
