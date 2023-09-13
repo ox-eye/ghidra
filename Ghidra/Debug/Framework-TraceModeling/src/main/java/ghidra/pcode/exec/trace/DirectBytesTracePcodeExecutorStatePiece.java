@@ -16,6 +16,8 @@
 package ghidra.pcode.exec.trace;
 
 import java.nio.ByteBuffer;
+import java.util.List;
+import java.util.Map;
 
 import javax.help.UnsupportedOperationException;
 
@@ -27,6 +29,7 @@ import ghidra.pcode.exec.PcodeArithmetic.Purpose;
 import ghidra.pcode.exec.trace.data.PcodeTraceDataAccess;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSpace;
+import ghidra.program.model.lang.Register;
 import ghidra.program.model.mem.MemBuffer;
 import ghidra.trace.model.memory.TraceMemoryState;
 
@@ -48,7 +51,7 @@ public class DirectBytesTracePcodeExecutorStatePiece
 
 	protected final PcodeTraceDataAccess data;
 
-	protected final SemisparseByteArray unique = new SemisparseByteArray();
+	protected final SemisparseByteArray unique;
 
 	/**
 	 * Construct a piece
@@ -57,9 +60,10 @@ public class DirectBytesTracePcodeExecutorStatePiece
 	 * @param data the trace-data access shim
 	 */
 	protected DirectBytesTracePcodeExecutorStatePiece(PcodeArithmetic<byte[]> arithmetic,
-			PcodeTraceDataAccess data) {
+			PcodeTraceDataAccess data, SemisparseByteArray unique) {
 		super(data.getLanguage(), arithmetic, arithmetic);
 		this.data = data;
+		this.unique = unique;
 	}
 
 	/**
@@ -67,13 +71,18 @@ public class DirectBytesTracePcodeExecutorStatePiece
 	 * 
 	 * @param data the trace-data access shim
 	 */
-	protected DirectBytesTracePcodeExecutorStatePiece(PcodeTraceDataAccess data) {
-		this(BytesPcodeArithmetic.forLanguage(data.getLanguage()), data);
+	public DirectBytesTracePcodeExecutorStatePiece(PcodeTraceDataAccess data) {
+		this(BytesPcodeArithmetic.forLanguage(data.getLanguage()), data, new SemisparseByteArray());
 	}
 
 	@Override
 	public PcodeTraceDataAccess getData() {
 		return data;
+	}
+
+	@Override
+	public DirectBytesTracePcodeExecutorStatePiece fork() {
+		return new DirectBytesTracePcodeExecutorStatePiece(arithmetic, data, unique.fork());
 	}
 
 	/**
@@ -99,7 +108,7 @@ public class DirectBytesTracePcodeExecutorStatePiece
 	}
 
 	@Override
-	protected byte[] getUnique(long offset, int size) {
+	protected byte[] getUnique(long offset, int size, Reason reason) {
 		byte[] data = new byte[size];
 		unique.getData(offset, data);
 		return data;
@@ -120,13 +129,24 @@ public class DirectBytesTracePcodeExecutorStatePiece
 	}
 
 	@Override
-	protected byte[] getFromSpace(AddressSpace space, long offset, int size) {
+	protected byte[] getFromSpace(AddressSpace space, long offset, int size, Reason reason) {
 		ByteBuffer buf = ByteBuffer.allocate(size);
 		int read = data.getBytes(space.getAddress(offset), buf);
 		if (read != size) {
 			throw new RuntimeException("Could not read full value from trace");
 		}
 		return buf.array();
+	}
+
+	@Override
+	protected Map<Register, byte[]> getRegisterValuesFromSpace(AddressSpace s,
+			List<Register> registers) {
+		return Map.of();
+	}
+
+	@Override
+	public Map<Register, byte[]> getRegisterValues() {
+		return Map.of();
 	}
 
 	@Override
@@ -137,5 +157,10 @@ public class DirectBytesTracePcodeExecutorStatePiece
 	@Override
 	public void writeDown(PcodeTraceDataAccess into) {
 		// Writes directly, so just ignore
+	}
+
+	@Override
+	public void clear() {
+		unique.clear();
 	}
 }

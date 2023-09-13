@@ -16,9 +16,14 @@
 package ghidra.app.plugin.core.debug.gui.memory;
 
 import java.awt.BorderLayout;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.lang.invoke.MethodHandles;
 import java.math.BigInteger;
 import java.util.*;
+
+import javax.swing.JLabel;
+import javax.swing.JPanel;
 
 import org.apache.commons.lang3.StringUtils;
 
@@ -26,6 +31,7 @@ import docking.action.DockingAction;
 import docking.action.ToggleDockingAction;
 import docking.menu.MultiStateDockingAction;
 import docking.widgets.fieldpanel.support.ViewerPosition;
+import generic.theme.GThemeDefaults.Colors;
 import ghidra.app.plugin.core.byteviewer.*;
 import ghidra.app.plugin.core.debug.DebuggerCoordinates;
 import ghidra.app.plugin.core.debug.gui.DebuggerLocationLabel;
@@ -47,7 +53,10 @@ import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.util.ProgramLocation;
 import ghidra.program.util.ProgramSelection;
 import ghidra.trace.model.Trace;
+import ghidra.trace.model.Trace.TraceMemoryBytesChangeType;
+import ghidra.trace.model.TraceDomainObjectListener;
 import ghidra.trace.model.program.TraceProgramView;
+import ghidra.trace.util.TraceAddressSpace;
 import ghidra.util.Swing;
 
 public class DebuggerMemoryBytesProvider extends ProgramByteViewerComponentProvider {
@@ -75,10 +84,28 @@ public class DebuggerMemoryBytesProvider extends ProgramByteViewerComponentProvi
 		return true;
 	}
 
+	protected class ListenerForChanges extends TraceDomainObjectListener {
+		public ListenerForChanges() {
+			listenFor(TraceMemoryBytesChangeType.CHANGED, this::bytesChanged);
+		}
+
+		private void bytesChanged(TraceAddressSpace space) {
+			if (space.getAddressSpace().isMemorySpace()) {
+				currCache.invalidate();
+				prevCache.invalidate();
+			}
+		}
+	}
+
 	protected class ForMemoryBytesGoToTrait extends DebuggerGoToTrait {
 		public ForMemoryBytesGoToTrait() {
 			super(DebuggerMemoryBytesProvider.this.tool, DebuggerMemoryBytesProvider.this.plugin,
 				DebuggerMemoryBytesProvider.this);
+		}
+
+		@Override
+		protected GoToInput getDefaultInput() {
+			return trackingTrait.getDefaultGoToInput(currentLocation);
 		}
 
 		@Override
@@ -87,7 +114,7 @@ public class DebuggerMemoryBytesProvider extends ProgramByteViewerComponentProvi
 			if (view == null) {
 				return false;
 			}
-			return goTo(view, new ProgramLocation(view, address));
+			return DebuggerMemoryBytesProvider.this.goTo(view, new ProgramLocation(view, address));
 		}
 	}
 
@@ -100,6 +127,14 @@ public class DebuggerMemoryBytesProvider extends ProgramByteViewerComponentProvi
 		@Override
 		protected void locationTracked() {
 			doGoToTracked();
+		}
+
+		@Override
+		protected void specChanged(LocationTrackingSpec spec) {
+			updateTitle();
+			trackingLabel.setText("");
+			trackingLabel.setToolTipText("");
+			trackingLabel.setForeground(Colors.FOREGROUND);
 		}
 	}
 
@@ -144,6 +179,7 @@ public class DebuggerMemoryBytesProvider extends ProgramByteViewerComponentProvi
 	protected ForMemoryBytesReadsMemoryTrait readsMemTrait;
 
 	protected final DebuggerLocationLabel locationLabel = new DebuggerLocationLabel();
+	protected final JLabel trackingLabel = new JLabel();
 
 	@AutoConfigStateField
 	protected boolean followsCurrentThread = true;
@@ -151,7 +187,13 @@ public class DebuggerMemoryBytesProvider extends ProgramByteViewerComponentProvi
 	protected AutoReadMemorySpec autoReadMemorySpec = defaultReadMemorySpec;
 	// TODO: followsCurrentSnap?
 
+	private final ListenerForChanges listenerForChanges = new ListenerForChanges();
+
 	DebuggerCoordinates current = DebuggerCoordinates.NOWHERE;
+	private DebuggerCoordinates previous = DebuggerCoordinates.NOWHERE;
+
+	private final CachedBytePage currCache = new CachedBytePage();
+	private final CachedBytePage prevCache = new CachedBytePage();
 
 	protected final boolean isMainViewer;
 
@@ -164,7 +206,11 @@ public class DebuggerMemoryBytesProvider extends ProgramByteViewerComponentProvi
 		autoServiceWiring = AutoService.wireServicesConsumed(plugin, this);
 		createActions();
 		addDisplayListener(readsMemTrait.getDisplayListener());
-		decorationComponent.add(locationLabel, BorderLayout.NORTH);
+
+		JPanel northPanel = new JPanel(new BorderLayout());
+		northPanel.add(locationLabel);
+		northPanel.add(trackingLabel, BorderLayout.EAST);
+		decorationComponent.add(northPanel, BorderLayout.NORTH);
 
 		goToTrait.goToCoordinates(current);
 		trackingTrait.goToCoordinates(current);
@@ -172,6 +218,36 @@ public class DebuggerMemoryBytesProvider extends ProgramByteViewerComponentProvi
 		locationLabel.goToCoordinates(current);
 
 		setHelpLocation(DebuggerResources.HELP_PROVIDER_MEMORY_BYTES);
+
+		trackingLabel.addMouseListener(new MouseAdapter() {
+			@Override
+			public void mouseClicked(MouseEvent e) {
+				if (e.getClickCount() == 2 && e.getButton() == MouseEvent.BUTTON1) {
+					doGoToTracked();
+				}
+			}
+		});
+	}
+
+	@Override
+	protected ByteBlockChangeManager newByteBlockChangeManager(ProgramByteBlockSet blockSet,
+			ByteBlockChangeManager bbcm) {
+		return new ByteBlockChangeManager(blockSet, bbcm) {
+			@Override
+			protected boolean isChanged(ByteBlock block, BigInteger offset, int unitByteSize) {
+				if (super.isChanged(block, offset, unitByteSize)) {
+					return true;
+				}
+				if (previous.getTrace() != current.getTrace()) {
+					return false;
+				}
+				Address address = blockSet.getAddress(block, offset);
+				if (address == null) {
+					return false;
+				}
+				return currCache.getByte(current, address) != prevCache.getByte(previous, address);
+			}
+		};
 	}
 
 	@Override
@@ -260,6 +336,11 @@ public class DebuggerMemoryBytesProvider extends ProgramByteViewerComponentProvi
 		setSubTitle(computeSubTitle());
 	}
 
+	@Override
+	protected ByteViewerActionContext newByteViewerActionContext() {
+		return new DebuggerMemoryBytesActionContext(this);
+	}
+
 	protected void createActions() {
 		initTraits();
 
@@ -299,9 +380,29 @@ public class DebuggerMemoryBytesProvider extends ProgramByteViewerComponentProvi
 
 	@Override
 	public boolean goTo(Program gotoProgram, ProgramLocation location) {
-		boolean result = super.goTo(gotoProgram, location);
-		locationLabel.goToAddress(location == null ? null : location.getAddress());
-		return result;
+		if (location == null) {
+			return false;
+		}
+		if (blockSet == null || blockSet.getByteBlockInfo(location.getAddress()) == null) {
+			return false;
+		}
+		if (!super.goTo(gotoProgram, location)) {
+			return false;
+		}
+		locationLabel.goToAddress(location.getAddress());
+		return true;
+	}
+
+	protected void removeOldListeners() {
+		if (current.getTrace() != null) {
+			current.getTrace().removeListener(listenerForChanges);
+		}
+	}
+
+	protected void addNewListeners() {
+		if (current.getTrace() != null) {
+			current.getTrace().addListener(listenerForChanges);
+		}
 	}
 
 	protected DebuggerCoordinates adjustCoordinates(DebuggerCoordinates coordinates) {
@@ -318,18 +419,26 @@ public class DebuggerMemoryBytesProvider extends ProgramByteViewerComponentProvi
 			current = coordinates;
 			return;
 		}
+		previous = current;
+		removeOldListeners();
 		current = coordinates;
+		addNewListeners();
 		doSetProgram(current.getView());
 		goToTrait.goToCoordinates(coordinates);
 		trackingTrait.goToCoordinates(coordinates);
 		readsMemTrait.goToCoordinates(coordinates);
 		locationLabel.goToCoordinates(coordinates);
+		updateTitle();
 		contextChanged();
 	}
 
 	public void coordinatesActivated(DebuggerCoordinates coordinates) {
 		DebuggerCoordinates adjusted = adjustCoordinates(coordinates);
 		goToCoordinates(adjusted);
+		if (adjusted.getTrace() == null) {
+			trackingLabel.setText("");
+			trackingLabel.setForeground(Colors.FOREGROUND);
+		}
 	}
 
 	public void traceClosed(Trace trace) {
@@ -370,6 +479,18 @@ public class DebuggerMemoryBytesProvider extends ProgramByteViewerComponentProvi
 		return readsMemTrait.getAutoSpec();
 	}
 
+	protected void goToAndUpdateTrackingLabel(TraceProgramView curView, ProgramLocation loc) {
+		String labelText = trackingTrait.computeLabelText();
+		trackingLabel.setText(labelText);
+		trackingLabel.setToolTipText(labelText);
+		if (goTo(curView, loc)) {
+			trackingLabel.setForeground(Colors.FOREGROUND);
+		}
+		else {
+			trackingLabel.setForeground(Colors.ERROR);
+		}
+	}
+
 	protected void doGoToTracked() {
 		if (editModeAction.isSelected()) {
 			return;
@@ -380,7 +501,11 @@ public class DebuggerMemoryBytesProvider extends ProgramByteViewerComponentProvi
 		}
 		TraceProgramView curView = current.getView();
 		Swing.runIfSwingOrRunLater(() -> {
-			goTo(curView, loc);
+			if (curView != current.getView()) {
+				// Trace changed before Swing scheduled us
+				return;
+			}
+			goToAndUpdateTrackingLabel(curView, loc);
 		});
 	}
 

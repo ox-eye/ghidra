@@ -71,13 +71,9 @@ public class DefaultPcodeTraceThreadAccess
 	}
 
 	@Override
-	public AddressSetView getKnownNow() {
-		return memory.getKnownNow().union(registers.getKnownNow());
-	}
-
-	@Override
-	public AddressSetView getKnownBefore() {
-		return memory.getKnownBefore().union(registers.getKnownBefore());
+	public AddressSetView intersectViewKnown(AddressSetView view, boolean useFullSpans) {
+		return memory.intersectViewKnown(view, useFullSpans)
+				.union(registers.intersectViewKnown(view, useFullSpans));
 	}
 
 	@Override
@@ -99,6 +95,14 @@ public class DefaultPcodeTraceThreadAccess
 			return registers.getBytes(start, buf);
 		}
 		return memory.getBytes(start, buf);
+	}
+
+	@Override
+	public Address translate(Address address) {
+		if (address.isRegisterAddress()) {
+			return registers.translate(address);
+		}
+		return memory.translate(address);
 	}
 
 	@Override

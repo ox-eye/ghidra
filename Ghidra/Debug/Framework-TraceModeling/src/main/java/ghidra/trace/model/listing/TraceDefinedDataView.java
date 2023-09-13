@@ -15,14 +15,12 @@
  */
 package ghidra.trace.model.listing;
 
-import com.google.common.collect.Range;
-
 import ghidra.program.model.address.Address;
 import ghidra.program.model.data.DataType;
 import ghidra.program.model.lang.Register;
 import ghidra.program.model.util.CodeUnitInsertionException;
-import ghidra.trace.model.Trace;
-import ghidra.trace.util.TraceRegisterUtils;
+import ghidra.trace.model.Lifespan;
+import ghidra.trace.model.guest.TracePlatform;
 
 /**
  * A view of defined data units
@@ -41,7 +39,7 @@ public interface TraceDefinedDataView extends TraceBaseDefinedUnitsView<TraceDat
 	 * @return the new data unit
 	 * @throws CodeUnitInsertionException if there's a conflict
 	 */
-	TraceData create(Range<Long> lifespan, Address address, DataType dataType, int length)
+	TraceData create(Lifespan lifespan, Address address, DataType dataType, int length)
 			throws CodeUnitInsertionException;
 
 	/**
@@ -57,7 +55,7 @@ public interface TraceDefinedDataView extends TraceBaseDefinedUnitsView<TraceDat
 	 * @return the new data unit
 	 * @throws CodeUnitInsertionException if there's a conflict
 	 */
-	TraceData create(Range<Long> lifespan, Address address, DataType dataType)
+	TraceData create(Lifespan lifespan, Address address, DataType dataType)
 			throws CodeUnitInsertionException;
 
 	/**
@@ -73,19 +71,26 @@ public interface TraceDefinedDataView extends TraceBaseDefinedUnitsView<TraceDat
 	 * @return the new data unit
 	 * @throws CodeUnitInsertionException if there's a conflict
 	 */
-	default TraceData create(Range<Long> lifespan, Register register, DataType dataType)
+	default TraceData create(Lifespan lifespan, Register register, DataType dataType)
 			throws CodeUnitInsertionException {
-		// TODO: A better way to handle memory-mapped registers?
-		Trace trace = getTrace();
-		if (register.getAddressSpace() != trace
-				.getBaseLanguage()
-				.getAddressFactory()
-				.getRegisterSpace()) {
-			return trace.getCodeManager()
-					.definedData()
-					.create(lifespan, register.getAddress(), dataType, register.getNumBytes());
-		}
-		TraceRegisterUtils.requireByteBound(register);
-		return create(lifespan, register.getAddress(), dataType, register.getNumBytes());
+		return create(getTrace().getPlatformManager().getHostPlatform(), lifespan, register,
+			dataType);
 	}
+
+	/**
+	 * Create a data unit on the given platform register
+	 * 
+	 * <p>
+	 * If the register is memory mapped, this will delegate to the appropriate space. In those
+	 * cases, the assignment affects all threads.
+	 * 
+	 * @param platform the platform whose language defines the register
+	 * @param lifespan the span for which the unit is effective
+	 * @param register the register to assign a data type
+	 * @param dataType the data type for the register
+	 * @return the new data unit
+	 * @throws CodeUnitInsertionException if there's a conflict
+	 */
+	TraceData create(TracePlatform platform, Lifespan lifespan, Register register,
+			DataType dataType) throws CodeUnitInsertionException;
 }

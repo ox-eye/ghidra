@@ -17,8 +17,8 @@ package ghidra.app.util.pdb.pdbapplicator;
 
 import java.util.*;
 
-import ghidra.app.cmd.disassemble.DisassembleCommand;
-import ghidra.app.cmd.function.*;
+import ghidra.app.cmd.function.ApplyFunctionSignatureCmd;
+import ghidra.app.cmd.function.CallDepthChangeInfo;
 import ghidra.app.util.bin.format.pdb2.pdbreader.PdbException;
 import ghidra.app.util.bin.format.pdb2.pdbreader.RecordNumber;
 import ghidra.app.util.bin.format.pdb2.pdbreader.symbol.*;
@@ -30,14 +30,15 @@ import ghidra.program.model.data.FunctionDefinition;
 import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.symbol.SourceType;
-import ghidra.util.exception.AssertException;
-import ghidra.util.exception.CancelledException;
+import ghidra.util.InvalidNameException;
+import ghidra.util.exception.*;
 import ghidra.util.task.TaskMonitor;
 
 /**
  * Applier for {@link AbstractProcedureStartMsSymbol} and  {@link AbstractThunkMsSymbol} symbols.
  */
-public class FunctionSymbolApplier extends MsSymbolApplier {
+public class FunctionSymbolApplier extends MsSymbolApplier
+		implements DeferrableFunctionSymbolApplier {
 
 	private static final String BLOCK_INDENT = "   ";
 
@@ -109,7 +110,7 @@ public class FunctionSymbolApplier extends MsSymbolApplier {
 		manageBlockNesting(this);
 
 		while (notDone()) {
-			applicator.checkCanceled();
+			applicator.checkCancelled();
 			MsSymbolApplier applier = applicator.getSymbolApplier(iter);
 			allAppliers.add(applier);
 			applier.manageBlockNesting(this);
@@ -132,6 +133,16 @@ public class FunctionSymbolApplier extends MsSymbolApplier {
 					thunkSymbol.getLength());
 			}
 		}
+	}
+
+	long getLength() {
+		if (procedureSymbol != null) {
+			return procedureSymbol.getProcedureLength();
+		}
+		else if (thunkSymbol != null) {
+			return thunkSymbol.getLength();
+		}
+		throw new AssertException("Unexpected Symbol type");
 	}
 
 	/**
@@ -252,54 +263,39 @@ public class FunctionSymbolApplier extends MsSymbolApplier {
 	}
 
 	private boolean applyFunction(TaskMonitor monitor) {
-		Listing listing = applicator.getProgram().getListing();
-
-		applicator.createSymbol(address, getName(), true);
-
-		function = listing.getFunctionAt(address);
-		if (function == null) {
-			function = createFunction(monitor);
-		}
+		function = applicator.getExistingOrCreateOneByteFunction(address);
 		if (function == null) {
 			return false;
 		}
+		applicator.scheduleDeferredFunctionWork(this);
 
-		if (!function.isThunk() &&
-			function.getSignatureSource().isLowerPriorityThan(SourceType.IMPORTED)) {
-			setFunctionDefinition(monitor);
-			function.setNoReturn(isNonReturning);
+		boolean succeededSetFunctionSignature = false;
+		if (thunkSymbol == null) {
+			if (function.getSignatureSource().isLowerPriorityThan(SourceType.IMPORTED)) {
+				function.setThunkedFunction(null);
+				succeededSetFunctionSignature = setFunctionDefinition(monitor);
+				function.setNoReturn(isNonReturning);
+			}
 		}
+		// If signature was set, then override existing primary mangled symbol with
+		// the global symbol that provided this signature so that Demangler does not overwrite
+		// the richer data type we get with global symbols.
+		applicator.createSymbol(address, getName(), succeededSetFunctionSignature);
+
 		currentFrameSize = 0;
 		return true;
 	}
 
-	private Function createFunction(TaskMonitor monitor) {
-
-		// Does function already exist?
-		Function myFunction = applicator.getProgram().getListing().getFunctionAt(address);
-		if (myFunction != null) {
-			// Actually not sure if we should set to 0 or calculate from the function here.
-			// Need to investigate more, so at least keeping it as a separate 'else' for now.
-			return myFunction;
-		}
-
-		// Disassemble
-		Instruction instr = applicator.getProgram().getListing().getInstructionAt(address);
-		if (instr == null) {
-			DisassembleCommand cmd = new DisassembleCommand(address, null, true);
-			cmd.applyTo(applicator.getProgram(), monitor);
-		}
-
-		myFunction = createFunctionCommand(monitor);
-
-		return myFunction;
-	}
-
+	/**
+	 * returns true only if we set a function signature
+	 * @param monitor monitor
+	 * @return true if function signature was set
+	 */
 	private boolean setFunctionDefinition(TaskMonitor monitor) {
 		if (procedureSymbol == null) {
 			// TODO: is there anything we can do with thunkSymbol?
 			// long x = thunkSymbol.getParentPointer();
-			return true;
+			return false;
 		}
 		// Rest presumes procedureSymbol.
 		RecordNumber typeRecordNumber = procedureSymbol.getTypeRecordNumber();
@@ -314,35 +310,36 @@ public class FunctionSymbolApplier extends MsSymbolApplier {
 				((PrimitiveTypeApplier) applier).isNoType())) {
 				applicator.appendLogMsg("Error: Failed to resolve datatype RecordNumber " +
 					typeRecordNumber + " at " + address);
-				return false;
 			}
+			return false;
 		}
 
 		DataType dataType = applier.getDataType();
 		// Since we know the applier is an AbstractionFunctionTypeApplier, then dataType is either
 		//  FunctionDefinition or no type (typedef).
-		if (dataType instanceof FunctionDefinition) {
-			FunctionDefinition def = (FunctionDefinition) dataType;
-			ApplyFunctionSignatureCmd sigCmd =
-				new ApplyFunctionSignatureCmd(address, def, SourceType.IMPORTED);
-			if (!sigCmd.applyTo(applicator.getProgram(), monitor)) {
-				applicator.appendLogMsg(
-					"PDB Warning: Failed to apply signature to function at address " + address +
-						" due to " + sigCmd.getStatusMsg() + "; dataType: " + def.getName());
-				return false;
-			}
+		if (!(dataType instanceof FunctionDefinition)) {
+			return false;
+		}
+		FunctionDefinition def =
+			(FunctionDefinition) dataType.copy(applicator.getDataTypeManager());
+		try {
+			// Must use copy of function definition with preserved function name.
+			// While not ideal, this prevents applying an incorrect function name
+			// with an IMPORTED source type
+			def.setName(function.getName());
+		}
+		catch (InvalidNameException | DuplicateNameException e) {
+			throw new RuntimeException("unexpected exception", e);
+		}
+		ApplyFunctionSignatureCmd sigCmd =
+			new ApplyFunctionSignatureCmd(address, def, SourceType.IMPORTED);
+		if (!sigCmd.applyTo(applicator.getProgram(), monitor)) {
+			applicator.appendLogMsg(
+				"PDB Warning: Failed to apply signature to function at address " + address +
+					" due to " + sigCmd.getStatusMsg() + "; dataType: " + def.getName());
+			return false;
 		}
 		return true;
-	}
-
-	private Function createFunctionCommand(TaskMonitor monitor) {
-		CreateFunctionCmd funCmd = new CreateFunctionCmd(address);
-		if (!funCmd.applyTo(applicator.getProgram(), monitor)) {
-			applicator.appendLogMsg("Failed to apply function at address " + address.toString() +
-				"; attempting to use possible existing function");
-			return applicator.getProgram().getListing().getFunctionAt(address);
-		}
-		return funCmd.getFunction();
 	}
 
 	private boolean notDone() {
@@ -426,7 +423,7 @@ public class FunctionSymbolApplier extends MsSymbolApplier {
 			function.getProgram().getListing().getInstructions(scopeSet, true);
 		int max = 0;
 		while (instructions.hasNext()) {
-			monitor.checkCanceled();
+			monitor.checkCancelled();
 			Instruction next = instructions.next();
 			int newValue = valueChange.getDepth(next.getMinAddress());
 			if (newValue < -(20 * 1024) || newValue > (20 * 1024)) {
@@ -478,4 +475,16 @@ public class FunctionSymbolApplier extends MsSymbolApplier {
 		}
 
 	}
+
+	@Override
+	public void doDeferredProcessing() {
+		// TODO:
+		// Try to processes parameters, locals, scopes if applicable.
+	}
+
+	@Override
+	public Address getAddress() {
+		return address;
+	}
+
 }

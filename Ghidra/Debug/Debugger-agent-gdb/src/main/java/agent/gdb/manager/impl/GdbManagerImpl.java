@@ -16,18 +16,19 @@
 package agent.gdb.manager.impl;
 
 import java.io.*;
+import java.text.MessageFormat;
 import java.util.*;
+import java.util.Map.Entry;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.swing.JDialog;
 import javax.swing.JOptionPane;
 
 import org.apache.commons.lang3.exception.ExceptionUtils;
-import org.python.core.PyDictionary;
-import org.python.icu.text.MessageFormat;
-import org.python.util.InteractiveConsole;
 
 import agent.gdb.manager.*;
 import agent.gdb.manager.GdbCause.Causes;
@@ -37,8 +38,10 @@ import agent.gdb.manager.evt.*;
 import agent.gdb.manager.impl.cmd.*;
 import agent.gdb.manager.impl.cmd.GdbConsoleExecCommand.CompletesWithRunning;
 import agent.gdb.manager.parsing.GdbMiParser;
+import agent.gdb.manager.parsing.GdbMiParser.GdbMiFieldList;
 import agent.gdb.manager.parsing.GdbParsingUtils.GdbParseError;
 import agent.gdb.pty.*;
+import agent.gdb.pty.PtyChild.Echo;
 import agent.gdb.pty.windows.AnsiBufferedInputStream;
 import ghidra.GhidraApplicationLayout;
 import ghidra.async.*;
@@ -75,6 +78,10 @@ public class GdbManagerImpl implements GdbManager {
 	private static final int TIMEOUT_SEC = 10;
 	private static final String GDB_IS_TERMINATING = "GDB is terminating";
 	public static final int MAX_CMD_LEN = 4094; // Account for longest possible line end
+
+	private String maintInfoSectionsCmd = GdbModuleImpl.MAINT_INFO_SECTIONS_CMD_V11;
+	private Pattern fileLinePattern = GdbModuleImpl.OBJECT_FILE_LINE_PATTERN_V11;
+	private Pattern sectionLinePattern = GdbModuleImpl.OBJECT_SECTION_LINE_PATTERN_V10;
 
 	private static final String PTY_DIALOG_MESSAGE_PATTERN =
 		"<html><p>Please enter:</p>" +
@@ -647,7 +654,9 @@ public class GdbManagerImpl implements GdbManager {
 		if (gdbCmd != null) {
 			iniThread = new PtyThread(ptyFactory.openpty(), Channel.STDOUT, null);
 
-			gdb = iniThread.pty.getChild().session(fullargs.toArray(new String[] {}), null);
+			Msg.info(this, "Starting gdb with: " + fullargs);
+			gdb =
+				iniThread.pty.getChild().session(fullargs.toArray(new String[] {}), null, Echo.OFF);
 			gdbWaiter = new Thread(this::waitGdbExit, "GDB WaitExit");
 			gdbWaiter.start();
 
@@ -670,12 +679,12 @@ public class GdbManagerImpl implements GdbManager {
 					cliThread.writer.print("set pagination off" + newLine);
 					String ptyName;
 					try {
-						ptyName = Objects.requireNonNull(mi2Pty.getChild().nullSession());
+						ptyName = Objects.requireNonNull(mi2Pty.getChild().nullSession(Echo.OFF));
 					}
 					catch (UnsupportedOperationException e) {
 						throw new IOException(
 							"Pty implementation does not support null sessions. Try " + gdbCmd +
-								" i mi2",
+								" -i mi2",
 							e);
 					}
 					cliThread.writer.print("new-ui mi2 " + ptyName + newLine);
@@ -700,7 +709,7 @@ public class GdbManagerImpl implements GdbManager {
 		}
 		else {
 			Pty mi2Pty = ptyFactory.openpty();
-			String mi2PtyName = mi2Pty.getChild().nullSession();
+			String mi2PtyName = mi2Pty.getChild().nullSession(Echo.OFF);
 			Msg.info(this, "Agent is waiting for GDB/MI v2 interpreter at " + mi2PtyName);
 			mi2Thread = new PtyThread(mi2Pty, Channel.STDOUT, Interpreter.MI2);
 			mi2Thread.setName("GDB Read MI2");
@@ -1440,6 +1449,21 @@ public class GdbManagerImpl implements GdbManager {
 		}
 	}
 
+	private void emitNewThreadFrameIfSpecified(GdbCommandDoneEvent evt) {
+		Integer newTid = evt.checkNewThreadId();
+		if (newTid == null) {
+			return;
+		}
+		GdbThreadImpl thread = threads.get(newTid);
+		if (thread == null) {
+			return;
+		}
+		GdbMiFieldList newFrame = evt.checkFrame();
+		GdbStackFrameImpl frame =
+			newFrame == null ? null : GdbStackFrameImpl.fromFieldList(thread, newFrame);
+		event(() -> listenersEvent.fire.threadSelected(thread, frame, evt), "command-done");
+	}
+
 	/**
 	 * Handler for "^done"
 	 * 
@@ -1447,6 +1471,7 @@ public class GdbManagerImpl implements GdbManager {
 	 * @param v nothing
 	 */
 	protected void processCommandDone(GdbCommandDoneEvent evt, Void v) {
+		emitNewThreadFrameIfSpecified(evt);
 		checkClaimed(evt);
 	}
 
@@ -1564,28 +1589,6 @@ public class GdbManagerImpl implements GdbManager {
 		}
 	}
 
-	// Link lazily to Jython
-	private static class JythonConsole {
-		/**
-		 * Launch a Jython interpreter
-		 * 
-		 * The interpreter the variable "{@code mgr}" bound to the manager. This method does not
-		 * return until the user exits the interpreter.
-		 * 
-		 * @param manager the manager
-		 */
-		static void interact(GdbManagerImpl manager) {
-			PyDictionary dict = new PyDictionary();
-			dict.put("mgr", manager);
-			try (InteractiveConsole jyConsole = new InteractiveConsole(dict);) {
-				jyConsole.interact();
-			}
-			catch (Throwable e) {
-				e.printStackTrace();
-			}
-		}
-	}
-
 	/**
 	 * An interface for taking lines of input
 	 */
@@ -1636,28 +1639,15 @@ public class GdbManagerImpl implements GdbManager {
 					System.out.println("quit");
 					return;
 				}
-				if (">>>".equals(cmd.trim())) {
-					try {
-						JythonConsole.interact(this);
+				console(cmd).exceptionally((e) -> {
+					Throwable realExc = AsyncUtils.unwrapThrowable(e);
+					if (realExc instanceof GdbCommandError) {
+						return null; // Gdb will have already printed it
 					}
-					catch (NoClassDefFoundError e) {
-						Msg.error(this, "Jython is not in the classpath");
-					}
-					catch (Throwable e) {
-						e.printStackTrace();
-					}
-				}
-				else {
-					console(cmd).exceptionally((e) -> {
-						Throwable realExc = AsyncUtils.unwrapThrowable(e);
-						if (realExc instanceof GdbCommandError) {
-							return null; // Gdb will have already printed it
-						}
-						e.printStackTrace();
-						//System.out.print(PROMPT_GDB + " ");
-						return null;
-					});
-				}
+					e.printStackTrace();
+					//System.out.print(PROMPT_GDB + " ");
+					return null;
+				});
 			}
 		}
 		finally {
@@ -1809,5 +1799,124 @@ public class GdbManagerImpl implements GdbManager {
 
 	public Interpreter getRunningInterpreter() {
 		return runningInterpreter;
+	}
+
+	private boolean isProbablyValid(String out) {
+		return out.contains("->0x");
+	}
+
+	private CompletableFuture<Map.Entry<String, String[]>> nextMaintInfoSections(
+			GdbInferiorImpl inferior, String cmds[], List<String[]> results) {
+		if (results.size() == cmds.length) {
+			int best = 0;
+			for (int i = 0; i < cmds.length; i++) {
+				if (results.get(i).length > results.get(best).length) {
+					best = i;
+				}
+			}
+			return CompletableFuture.completedFuture(Map.entry(cmds[best], results.get(best)));
+		}
+		String cmd = cmds[results.size()];
+		return inferior.consoleCapture(cmd, CompletesWithRunning.CANNOT).thenCompose(out -> {
+			String[] lines = out.split("\n");
+			if (isProbablyValid(out)) {
+				return CompletableFuture.completedFuture(Map.entry(cmd, lines));
+			}
+			results.add(lines);
+			return nextMaintInfoSections(inferior, cmds, results);
+		});
+	}
+
+	/**
+	 * Execute "maintenance info sections" for all objects, starting with the syntax that last
+	 * worked best
+	 * 
+	 * <p>
+	 * If any syntax yields at least 10 lines of output, then it is taken immediately, and the "last
+	 * best" syntax is updated. In most cases, the first execution is the only time this will need
+	 * to try more than once, since the underlying version should not change during the manager's
+	 * lifetime. If none give more than 10, then the one which yielded the most lines is selected.
+	 * This could happen in vacuous cases, e.g., if modules are requested without a target file.
+	 * 
+	 * @param inferior the inferior for context when executing the command
+	 * @return a future which completes with the list of lines
+	 */
+	protected CompletableFuture<String[]> execMaintInfoSectionsAllObjects(
+			GdbInferiorImpl inferior) {
+		// TODO: Would be nice to choose based on version
+		CompletableFuture<String> futureOut =
+			inferior.consoleCapture(maintInfoSectionsCmd, CompletesWithRunning.CANNOT);
+		return futureOut.thenCompose(out -> {
+			String[] lines = out.split("\n");
+			if (isProbablyValid(out)) {
+				return CompletableFuture.completedFuture(lines);
+			}
+			CompletableFuture<Entry<String, String[]>> futureBest = nextMaintInfoSections(inferior,
+				GdbModuleImpl.MAINT_INFO_SECTIONS_CMDS, new ArrayList<>());
+			return futureBest.thenApply(best -> {
+				maintInfoSectionsCmd = best.getKey();
+				return best.getValue();
+			});
+		});
+	}
+
+	/**
+	 * Match a module file line, starting with the last working pattern
+	 * 
+	 * <p>
+	 * In most cases, only the first attempt to parse causes an update to the "last working"
+	 * pattern, since the underlying GDB version should not change during the lifetime of the
+	 * manager.
+	 * 
+	 * @param line the line to parse
+	 * @return the matcher or null
+	 */
+	protected Matcher matchFileLine(String line) {
+		Matcher matcher;
+		matcher = fileLinePattern.matcher(line);
+		if (matcher.matches()) {
+			return matcher;
+		}
+		for (Pattern pattern : GdbModuleImpl.OBJECT_FILE_LINE_PATTERNS) {
+			matcher = pattern.matcher(line);
+			if (matcher.matches()) {
+				fileLinePattern = pattern;
+				return matcher;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Match a module section line, starting with the last working pattern
+	 * 
+	 * <p>
+	 * In most cases, only the first attempt to parse causes an update to the "last working"
+	 * pattern, since the underlying GDB version should not change during the lifetime of the
+	 * manager.
+	 * 
+	 * @param line the line to parse
+	 * @return the matcher or null
+	 */
+	protected Matcher matchSectionLine(String line) {
+		Matcher matcher;
+		matcher = sectionLinePattern.matcher(line);
+		if (matcher.matches()) {
+			return matcher;
+		}
+		for (Pattern pattern : GdbModuleImpl.OBJECT_SECTION_LINE_PATTERNS) {
+			matcher = pattern.matcher(line);
+			if (matcher.matches()) {
+				sectionLinePattern = pattern;
+				return matcher;
+			}
+		}
+		return null;
+	}
+
+	public void logInfo(String string) {
+		if (LOG_IO) {
+			DBG_LOG.println("INFO: " + string);
+		}
 	}
 }

@@ -15,14 +15,13 @@
  */
 package ghidra.app.plugin.core.debug.service.emulation.data;
 
-import com.google.common.collect.Range;
-
 import ghidra.app.services.DebuggerStaticMappingService;
 import ghidra.pcode.exec.trace.data.DefaultPcodeTracePropertyAccess;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.util.PropertyMap;
 import ghidra.program.util.ProgramLocation;
 import ghidra.trace.model.DefaultTraceLocation;
+import ghidra.trace.model.Lifespan;
 
 /**
  * The default trace-and-debugger-property access shim
@@ -59,18 +58,18 @@ public class DefaultPcodeDebuggerPropertyAccess<T>
 			return super.whenNull(hostAddress);
 		}
 		ProgramLocation progLoc = mappingService.getOpenMappedLocation(new DefaultTraceLocation(
-			data.getPlatform().getTrace(), null, Range.singleton(data.getSnap()), hostAddress));
+			data.getPlatform().getTrace(), null, Lifespan.at(data.getSnap()), hostAddress));
 		if (progLoc == null) {
 			return super.whenNull(hostAddress);
 		}
 
 		// NB. This is stored in the program, not the user data, despite what the name implies
-		PropertyMap map =
+		PropertyMap<?> map =
 			progLoc.getProgram().getUsrPropertyManager().getPropertyMap(name);
 		if (map == null) {
 			return super.whenNull(hostAddress);
 		}
-		Object object = map.getObject(progLoc.getByteAddress());
+		Object object = map.get(progLoc.getByteAddress());
 		if (!type.isInstance(object)) {
 			// TODO: Warn?
 			return super.whenNull(hostAddress);

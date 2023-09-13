@@ -50,7 +50,7 @@ import ghidra.util.task.TaskMonitor;
 /**
  * A {@link Loader} for processing dump files and their embedded objects.
  */
-public class DumpFileLoader extends AbstractLibrarySupportLoader {
+public class DumpFileLoader extends AbstractProgramWrapperLoader {
 
 	/** The name of the dump file loader */
 	public static final String DF_NAME = "Dump File Loader";
@@ -169,7 +169,7 @@ public class DumpFileLoader extends AbstractLibrarySupportLoader {
 				}
 				d.setRangeName(name);
 				monitor.setProgress(count++);
-				monitor.checkCanceled();
+				monitor.checkCancelled();
 			}
 			count = 0;
 			monitor.setMessage("Processing blocks");
@@ -188,7 +188,7 @@ public class DumpFileLoader extends AbstractLibrarySupportLoader {
 						d.isExec(), //section.isExecutable());
 						log);
 					monitor.setProgress(count++);
-					monitor.checkCanceled();
+					monitor.checkCancelled();
 				}
 				catch (AddressOutOfBoundsException | AddressOverflowException
 						| IllegalArgumentException e) {
@@ -221,10 +221,10 @@ public class DumpFileLoader extends AbstractLibrarySupportLoader {
 						}
 						deleted.add(next.getStart());
 						monitor.setProgress(count++);
-						monitor.checkCanceled();
+						monitor.checkCancelled();
 					}
 					monitor.setProgress(count++);
-					monitor.checkCanceled();
+					monitor.checkCancelled();
 					//memory.invalidateCache(true);
 				}
 			}
@@ -244,7 +244,7 @@ public class DumpFileLoader extends AbstractLibrarySupportLoader {
 		monitor.initialize(daos.size());
 		int count = 0;
 		for (Entry<Address, DumpAddressObject> entry : daos.entrySet()) {
-			monitor.checkCanceled();
+			monitor.checkCancelled();
 			monitor.setProgress(count++);
 			DumpAddressObject d = entry.getValue();
 			Address address = entry.getKey();
@@ -273,7 +273,7 @@ public class DumpFileLoader extends AbstractLibrarySupportLoader {
 		monitor.initialize(data.size());
 		int count = 0;
 		for (DumpData dd : data) {
-			monitor.checkCanceled();
+			monitor.checkCancelled();
 			monitor.setProgress(count++);
 			Address address = program.getImageBase().addWrap(dd.getOffset());
 			try {
@@ -288,7 +288,7 @@ public class DumpFileLoader extends AbstractLibrarySupportLoader {
 					}
 					continue;
 				}
-				DataUtilities.createData(program, address, dd.getDataType(), -1, false,
+				DataUtilities.createData(program, address, dd.getDataType(), -1,
 					DataUtilities.ClearDataMode.CHECK_FOR_SPACE);
 			}
 			catch (CodeUnitInsertionException e) {

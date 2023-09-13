@@ -16,10 +16,12 @@
 /// \file prettyprint.hh
 /// \brief Routines for emitting high-level (C) language syntax in a well formatted way.
 
-#ifndef __PRETTYPRINT__
-#define __PRETTYPRINT__
+#ifndef __PRETTYPRINT_HH__
+#define __PRETTYPRINT_HH__
 
 #include "type.hh"
+
+namespace ghidra {
 
 class Varnode;
 class PcodeOp;
@@ -115,7 +117,8 @@ public:
     param_color = 6,		///< Function parameters
     global_color = 7,		///< Global variable identifiers
     no_color = 8,		///< Un-highlighted
-    error_color = 9		///< Indicates a warning or error state
+    error_color = 9,		///< Indicates a warning or error state
+    special_color = 10		///< A token with special/highlighted meaning
   };
   virtual ~Emit(void) {}				///< Destructor
 
@@ -1059,4 +1062,5 @@ inline void Emit::emitPending(void)
   }
 }
 
+} // End namespace ghidra
 #endif

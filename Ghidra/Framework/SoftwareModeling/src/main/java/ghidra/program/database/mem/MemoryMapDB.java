@@ -346,6 +346,9 @@ public class MemoryMapDB implements Memory, ManagerDB, LiveMemoryListener {
 				block.getName() + " does not contain address " + start.toString(true));
 		}
 
+		// TODO: We should not really permit changing Data where Dynamic datatype resides
+		// since it could impact its computed length.
+
 		try {
 			Address endAddr = start.addNoWrap(length - 1);
 			if (!block.contains(start)) {
@@ -1074,24 +1077,24 @@ public class MemoryMapDB implements Memory, ManagerDB, LiveMemoryListener {
 	}
 
 	@Override
-	public MemoryBlock convertToInitialized(MemoryBlock unitializedBlock, byte initialValue)
+	public MemoryBlock convertToInitialized(MemoryBlock uninitializedBlock, byte initialValue)
 			throws MemoryBlockException, NotFoundException, LockException {
 		lock.acquire();
 		try {
-			checkBlock(unitializedBlock);
+			checkBlock(uninitializedBlock);
 			program.checkExclusiveAccess();
-			if (unitializedBlock.isInitialized()) {
+			if (uninitializedBlock.isInitialized()) {
 				throw new IllegalArgumentException(
 					"Only an Uninitialized Block may be converted to an Initialized Block");
 			}
-			if (unitializedBlock.getType() != MemoryBlockType.DEFAULT) {
+			if (uninitializedBlock.getType() != MemoryBlockType.DEFAULT) {
 				throw new IllegalArgumentException("Block is of a type that cannot be initialized");
 			}
-			long size = unitializedBlock.getSize();
+			long size = uninitializedBlock.getSize();
 			if (size > MAX_BLOCK_SIZE) {
 				throw new MemoryBlockException("Block too large to initialize");
 			}
-			MemoryBlockDB memBlock = (MemoryBlockDB) unitializedBlock;
+			MemoryBlockDB memBlock = (MemoryBlockDB) uninitializedBlock;
 			try {
 				memBlock.initializeBlock(initialValue);
 				initializeBlocks();
@@ -2294,7 +2297,7 @@ public class MemoryMapDB implements Memory, ManagerDB, LiveMemoryListener {
 
 	void checkRangeForInstructions(Address start, Address end) throws MemoryAccessException {
 		CodeManager codeManager = program.getCodeManager();
-		Instruction instr = codeManager.getInstructionContaining(start);
+		Instruction instr = codeManager.getInstructionContaining(start, true);
 		if (instr != null) {
 			throw new MemoryAccessException(
 				"Memory change conflicts with instruction at " + instr.getMinAddress());

@@ -26,6 +26,7 @@ import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.Undefined;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.symbol.*;
+import ghidra.util.Msg;
 import ghidra.util.SystemUtilities;
 
 /**
@@ -329,14 +330,21 @@ public class LocalSymbolMap {
 	 * Encode all the variables in this local variable map to the stream
 	 * @param encoder is the stream encoder
 	 * @param namespace if the namespace of the function
+	 * @param transformer is used to compute a simplified version of the namespace name
 	 * @throws IOException for errors in the underlying stream
 	 */
-	public void encodeLocalDb(Encoder encoder, Namespace namespace) throws IOException {
+	public void encodeLocalDb(Encoder encoder, Namespace namespace, NameTransformer transformer)
+			throws IOException {
 		encoder.openElement(ELEM_LOCALDB);
 		encoder.writeBool(ATTRIB_LOCK, false);
 		encoder.writeSpace(ATTRIB_MAIN, localSpace);
 		encoder.openElement(ELEM_SCOPE);
-		encoder.writeString(ATTRIB_NAME, func.getFunction().getName());
+		String nm = func.getFunction().getName();
+		encoder.writeString(ATTRIB_NAME, nm);
+		String altName = transformer.simplify(nm);
+		if (!nm.equals(altName)) {
+			encoder.writeString(ATTRIB_LABEL, altName);
+		}
 		encoder.openElement(ELEM_PARENT);
 		long parentid = Namespace.GLOBAL_NAMESPACE_ID;
 		if (!HighFunction.collapseToGlobal(namespace)) {
@@ -344,7 +352,7 @@ public class LocalSymbolMap {
 		}
 		encoder.writeUnsignedInteger(ATTRIB_ID, parentid);
 		encoder.closeElement(ELEM_PARENT);
-		encoder.openElement(ELEM_RANGELIST);	// Emptry address range
+		encoder.openElement(ELEM_RANGELIST);	// Empty address range
 		encoder.closeElement(ELEM_RANGELIST);
 		encoder.openElement(ELEM_SYMBOLLIST);
 		Iterator<HighSymbol> iter = symbolMap.values().iterator();
@@ -422,16 +430,6 @@ public class LocalSymbolMap {
 	 */
 	public HighParam getParam(int i) {
 		return (HighParam) paramSymbols[i].getHighVariable();
-	}
-
-	public boolean containsVariableWithName(String name) {
-		Collection<HighSymbol> values = symbolMap.values();
-		for (HighSymbol sym : values) {
-			if (sym.getName().equals(name)) {
-				return true;
-			}
-		}
-		return false;
 	}
 
 	protected HighSymbol newMappedSymbol(long id, String nm, DataType dt, VariableStorage store,
@@ -576,9 +574,20 @@ public class LocalSymbolMap {
 		}
 
 		public MappedVarKey(VariableStorage store, Address pcad) {
-			addr = store.getFirstVarnode().getAddress();
-			if (!addr.isStackAddress()) {
-				// first use not supported for stack
+			Varnode first = store.getFirstVarnode();
+
+			if (first != null) {
+				addr = first.getAddress();
+				if (!addr.isStackAddress()) {
+					// first use not supported for stack
+					pcaddr = pcad;
+				}
+			}
+			else {
+				// Hack: first can come back as null if something has gone wrong, such as a 
+				// spacebase without a range.
+				Msg.warn(this, "First use is null, possible spacebase/global range issue." +
+					"There will be variable rename issues");
 				pcaddr = pcad;
 			}
 		}
@@ -589,12 +598,14 @@ public class LocalSymbolMap {
 			if (!SystemUtilities.isEqual(pcaddr, op.pcaddr)) {
 				return false;
 			}
-			return addr.equals(op.addr);
+			return SystemUtilities.isEqual(addr, op.addr);
 		}
 
 		@Override
 		public int hashCode() {
-			int hash1 = addr.hashCode();
+			// Hack: addr should not be null, but can be if something in decompiler went wrong
+			//       most likely a spacebase without a corresponding global register range entry
+			int hash1 = addr != null ? addr.hashCode() : 0;
 			int hash2 = pcaddr != null ? pcaddr.hashCode() : 0;
 			return (hash1 << 4) ^ hash2;
 		}

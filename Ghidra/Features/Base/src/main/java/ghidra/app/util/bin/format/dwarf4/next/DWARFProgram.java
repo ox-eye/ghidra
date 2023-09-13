@@ -32,7 +32,7 @@ import ghidra.app.util.bin.format.dwarf4.external.ExternalDebugInfo;
 import ghidra.app.util.bin.format.dwarf4.next.sectionprovider.*;
 import ghidra.app.util.opinion.*;
 import ghidra.program.model.address.Address;
-import ghidra.program.model.address.AddressSet;
+import ghidra.program.model.address.AddressSpace;
 import ghidra.program.model.data.CategoryPath;
 import ghidra.program.model.data.DataType;
 import ghidra.program.model.listing.Program;
@@ -49,9 +49,13 @@ import ghidra.util.task.TaskMonitor;
  */
 public class DWARFProgram implements Closeable {
 	public static final String DWARF_ROOT_NAME = "DWARF";
+	public static final CategoryPath DWARF_ROOT_CATPATH = CategoryPath.ROOT.extend(DWARF_ROOT_NAME);
+	public static final CategoryPath UNCAT_CATPATH = DWARF_ROOT_CATPATH.extend("_UNCATEGORIZED_");
+
 	public static final int DEFAULT_NAME_LENGTH_CUTOFF = SymbolUtilities.MAX_SYMBOL_NAME_LENGTH;
 	public static final int MAX_NAME_LENGTH_CUTOFF = SymbolUtilities.MAX_SYMBOL_NAME_LENGTH;
 	public static final int MIN_NAME_LENGTH_CUTOFF = 20;
+
 	private static final int NAME_HASH_REPLACEMENT_SIZE = 8 + 2 + 2;
 	private static final String ELLIPSES_STR = "...";
 
@@ -63,7 +67,7 @@ public class DWARFProgram implements Closeable {
 	 * program sections, or their compressed "z" versions.
 	 * <p>
 	 * If the program is a MachO binary (ie. Mac), it must have a ".dSYM" directory co-located next to the
-	 * original binary file on the native filesystem.  (ie. outside of Ghidra).  See the DSymSectionProvider
+	 * original binary file on the native filesystem.  (lie. outside of Ghidra).  See the DSymSectionProvider
 	 * for more info.
 	 * <p>
 	 * @param program {@link Program} to test
@@ -78,7 +82,8 @@ public class DWARFProgram implements Closeable {
 				return hasExpectedDWARFSections(program) ||
 					ExternalDebugInfo.fromProgram(program) != null;
 			case MachoLoader.MACH_O_NAME:
-				return DSymSectionProvider.getDSYMForProgram(program) != null;
+				return hasExpectedDWARFSections(program) ||
+					DSymSectionProvider.getDSYMForProgram(program) != null;
 		}
 		return false;
 	}
@@ -115,10 +120,9 @@ public class DWARFProgram implements Closeable {
 
 	private final Program program;
 	private DWARFImportOptions importOptions;
-	private DWARFNameInfo rootDNI =
-		DWARFNameInfo.createRoot(new CategoryPath(CategoryPath.ROOT, DWARF_ROOT_NAME));
-	private DWARFNameInfo unCatDataTypeRoot = DWARFNameInfo.createRoot(
-		new CategoryPath(rootDNI.getOrganizationalCategoryPath(), "_UNCATEGORIZED_"));
+	private DWARFImportSummary importSummary;
+	private DWARFNameInfo rootDNI = DWARFNameInfo.createRoot(DWARF_ROOT_CATPATH);
+	private DWARFNameInfo unCatDataTypeRoot = DWARFNameInfo.createRoot(UNCAT_CATPATH);
 
 	private DWARFSectionProvider sectionProvider;
 	private StringTable debugStrings;
@@ -174,6 +178,12 @@ public class DWARFProgram implements Closeable {
 	 */
 	private ListValuedMap<Long, DIEAggregate> typeReferers = new ArrayListValuedHashMap<>();
 
+	private final DWARFDataTypeManager dwarfDTM;
+
+	private final boolean stackGrowsNegative;
+
+	private final Map<Object, Object> opaqueProps = new HashMap<>();
+
 	/**
 	 * Main constructor for DWARFProgram.
 	 * <p>
@@ -214,13 +224,15 @@ public class DWARFProgram implements Closeable {
 		this.program = program;
 		this.sectionProvider = sectionProvider;
 		this.importOptions = importOptions;
+		this.importSummary = new DWARFImportSummary();
 		this.nameLengthCutoffSize = Math.max(MIN_NAME_LENGTH_CUTOFF,
 			Math.min(importOptions.getNameLengthCutoff(), MAX_NAME_LENGTH_CUTOFF));
+		this.dwarfDTM = new DWARFDataTypeManager(this, program.getDataTypeManager());
+		this.stackGrowsNegative = program.getCompilerSpec().stackGrowsNegative();
 
 		monitor.setMessage("Reading DWARF debug string table");
 		this.debugStrings = StringTable.readStringTable(
 			sectionProvider.getSectionAsByteProvider(DWARFSectionNames.DEBUG_STR, monitor));
-//		Msg.info(this, "Read DWARF debug string table, " + debugStrings.getByteCount() + " bytes.");
 
 		this.attributeFactory = new DWARFAttributeFactory(this);
 
@@ -266,8 +278,16 @@ public class DWARFProgram implements Closeable {
 		return importOptions;
 	}
 
+	public DWARFImportSummary getImportSummary() {
+		return importSummary;
+	}
+
 	public Program getGhidraProgram() {
 		return program;
+	}
+
+	public DWARFDataTypeManager getDwarfDTM() {
+		return dwarfDTM;
 	}
 
 	public boolean isBigEndian() {
@@ -289,12 +309,8 @@ public class DWARFProgram implements Closeable {
 			return false;
 		}
 		ByteProvider bp = br.getByteProvider();
-		if (bp instanceof MemoryByteProvider && bp.length() > 0) {
-			MemoryByteProvider mbp = (MemoryByteProvider) bp;
-			Address startAddr = mbp.getAddress(0);
-			Address endAddr = mbp.getAddress(mbp.length() - 1);
-			if (program.getRelocationTable().getRelocations(
-				new AddressSet(startAddr, endAddr)).hasNext()) {
+		if (bp instanceof MemoryByteProvider mbp && !mbp.isEmpty()) {
+			if (program.getRelocationTable().getRelocations(mbp.getAddressSet()).hasNext()) {
 				return true;
 			}
 		}
@@ -448,6 +464,7 @@ public class DWARFProgram implements Closeable {
 
 		String origName = isAnon ? null : name;
 		String workingName = ensureSafeNameLength(name);
+		workingName = fixupSpecialMeaningCharacters(workingName);
 
 		DWARFNameInfo result =
 			parentDNI.createChild(origName, workingName, DWARFUtil.getSymbolTypeFromDIE(diea));
@@ -553,6 +570,16 @@ public class DWARFProgram implements Closeable {
 		return strs;
 	}
 
+	private String fixupSpecialMeaningCharacters(String s) {
+		// golang specific hacks:
+		// "\u00B7" -> "."
+		// "\u2215" -> "/"
+		if (s.contains("\u00B7") || s.contains("\u2215")) {
+			s = s.replaceAll("\u00B7", ".").replaceAll("\u2215", "/");
+		}
+		return s;
+	}
+
 	public DWARFNameInfo getName(DIEAggregate diea) {
 		DWARFNameInfo dni = lookupDNIByOffset(diea.getOffset());
 		if (dni == null) {
@@ -584,8 +611,8 @@ public class DWARFProgram implements Closeable {
 
 		BinaryReader br = debugInfoBR;
 		br.setPointerIndex(0);
-		while (br.getPointerIndex() < br.getByteProvider().length()) {
-			monitor.checkCanceled();
+		while (br.hasNext()) {
+			monitor.checkCancelled();
 			monitor.setMessage("Bootstrapping DWARF Compilation Unit #" + compUnits.size());
 
 			DWARFCompilationUnit cu = DWARFCompilationUnit.readCompilationUnit(this, br,
@@ -720,6 +747,10 @@ public class DWARFProgram implements Closeable {
 
 	public StringTable getDebugStrings() {
 		return debugStrings;
+	}
+
+	public AddressSpace getStackSpace() {
+		return program.getAddressFactory().getStackSpace();
 	}
 
 	public DWARFAttributeFactory getAttributeFactory() {
@@ -1015,5 +1046,30 @@ public class DWARFProgram implements Closeable {
 	 */
 	public long getProgramBaseAddressFixup() {
 		return programBaseAddressFixup;
+	}
+
+	public Address getCodeAddress(Number offset) {
+		return program.getAddressFactory()
+				.getDefaultAddressSpace()
+				.getAddress(offset.longValue(), true);
+	}
+
+	public Address getDataAddress(Number offset) {
+		return program.getAddressFactory()
+				.getDefaultAddressSpace()
+				.getAddress(offset.longValue(), true);
+	}
+
+	public boolean stackGrowsNegative() {
+		return stackGrowsNegative;
+	}
+
+	public <T> T getOpaqueProperty(Object key, T defaultValue, Class<T> valueClass) {
+		Object obj = opaqueProps.get(key);
+		return obj != null && valueClass.isInstance(obj) ? valueClass.cast(obj) : defaultValue;
+	}
+
+	public void setOpaqueProperty(Object key, Object value) {
+		opaqueProps.put(key, value);
 	}
 }

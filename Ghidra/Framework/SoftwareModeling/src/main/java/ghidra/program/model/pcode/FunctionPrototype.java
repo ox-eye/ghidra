@@ -36,7 +36,6 @@ public class FunctionPrototype {
 
 	private LocalSymbolMap localsyms; // Prototype backed by symbol map
 	private String modelname; // Name of prototype model
-	private GenericCallingConvention gconv; // Generic name for the model
 	private String injectname; // Name of pcode inject associated with this prototype
 	private DataType returntype; // Output parameter
 	private VariableStorage returnstorage;	// Where the output value is stored
@@ -64,7 +63,6 @@ public class FunctionPrototype {
 	public FunctionPrototype(LocalSymbolMap ls, Function func) {
 		localsyms = ls;
 		modelname = null;
-		gconv = null;
 		injectname = null;
 		returntype = null;
 		returnstorage = null;
@@ -90,10 +88,9 @@ public class FunctionPrototype {
 	 */
 	public FunctionPrototype(FunctionSignature proto, CompilerSpec cspec,
 			boolean voidimpliesdotdotdot) {
-		modelname = proto.getGenericCallingConvention().getDeclarationName();
-		PrototypeModel model = cspec.matchConvention(proto.getGenericCallingConvention());
+		modelname = proto.getCallingConventionName();
+		PrototypeModel model = cspec.matchConvention(modelname);
 		localsyms = null;
-		gconv = proto.getGenericCallingConvention();
 		injectname = null;
 		returntype = proto.getReturnType();
 		returnstorage = null;
@@ -103,7 +100,7 @@ public class FunctionPrototype {
 		outputlock = true;
 		dotdotdot = proto.hasVarArgs();
 		isinline = false;
-		noreturn = false;
+		noreturn = proto.hasNoReturn();
 		custom = false;
 		extrapop = model.getExtrapop();
 		hasThis = model.hasThisPointer();
@@ -135,8 +132,7 @@ public class FunctionPrototype {
 			protoModel = f.getProgram().getCompilerSpec().getDefaultCallingConvention();
 		}
 		hasThis = protoModel.hasThisPointer();
-		modellock =
-			((modelname != null) && (modelname != Function.UNKNOWN_CALLING_CONVENTION_STRING));
+		modellock = !f.hasUnknownCallingConventionName();
 		injectname = f.getCallFixup();
 		voidinputlock = false;
 		Parameter returnparam = f.getReturn();
@@ -311,13 +307,6 @@ public class FunctionPrototype {
 	}
 
 	/**
-	 * @return generic calling convention
-	 */
-	public GenericCallingConvention getGenericCallingConvention() {
-		return gconv;
-	}
-
-	/**
 	 * Encode this function prototype to a stream.
 	 * @param encoder is the stream encoder
 	 * @param dtmanage is the DataTypeManager for building type reference tags
@@ -427,12 +416,8 @@ public class FunctionPrototype {
 		PrototypeModel protoModel =
 			dtmanage.getProgram().getCompilerSpec().getCallingConvention(modelname);
 		hasThis = (protoModel == null) ? false : protoModel.hasThisPointer();
-		try {
-			extrapop = (int) decoder.readSignedInteger(ATTRIB_EXTRAPOP);
-		}
-		catch (DecoderException e) {
-			extrapop = PrototypeModel.UNKNOWN_EXTRAPOP;
-		}
+		extrapop = (int) decoder.readSignedIntegerExpectString(ATTRIB_EXTRAPOP, "unknown",
+			PrototypeModel.UNKNOWN_EXTRAPOP);
 		modellock = false;
 		dotdotdot = false;
 		voidinputlock = false;

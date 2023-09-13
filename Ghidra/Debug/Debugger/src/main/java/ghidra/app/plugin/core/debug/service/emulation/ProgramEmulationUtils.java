@@ -21,10 +21,13 @@ import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import com.google.common.collect.Range;
-
+import db.Transaction;
 import ghidra.app.plugin.core.debug.service.modules.DebuggerStaticMappingUtils;
+import ghidra.app.plugin.core.debug.service.modules.DebuggerStaticMappingUtils.Extrema;
 import ghidra.app.services.DebuggerEmulationService;
+import ghidra.dbg.target.*;
+import ghidra.dbg.target.schema.TargetObjectSchema;
+import ghidra.dbg.util.*;
 import ghidra.framework.model.DomainFile;
 import ghidra.program.model.address.*;
 import ghidra.program.model.lang.*;
@@ -33,15 +36,14 @@ import ghidra.program.model.listing.ProgramContext;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.util.ProgramLocation;
 import ghidra.trace.database.DBTrace;
-import ghidra.trace.model.DefaultTraceLocation;
-import ghidra.trace.model.Trace;
+import ghidra.trace.model.*;
 import ghidra.trace.model.memory.*;
 import ghidra.trace.model.modules.TraceConflictedMappingException;
-import ghidra.trace.model.thread.TraceThread;
-import ghidra.trace.model.thread.TraceThreadManager;
+import ghidra.trace.model.target.TraceObject;
+import ghidra.trace.model.target.TraceObjectKeyPath;
+import ghidra.trace.model.thread.*;
 import ghidra.trace.model.time.TraceSnapshot;
 import ghidra.util.*;
-import ghidra.util.database.UndoableTransaction;
 import ghidra.util.exception.DuplicateNameException;
 
 /**
@@ -53,6 +55,7 @@ import ghidra.util.exception.DuplicateNameException;
  */
 public enum ProgramEmulationUtils {
 	;
+	public static final String BLOCK_NAME_STACK = "STACK";
 
 	/**
 	 * Conventional prefix for first snapshot to identify "pure emulation" traces.
@@ -115,18 +118,6 @@ public enum ProgramEmulationUtils {
 		return result;
 	}
 
-	static class Extrema {
-		Address min = null;
-		Address max = null;
-
-		void consider(AddressRange range) {
-			min = min == null ? range.getMinAddress()
-					: ComparatorMath.cmin(min, range.getMinAddress());
-			max = max == null ? range.getMaxAddress()
-					: ComparatorMath.cmax(max, range.getMaxAddress());
-		}
-	}
-
 	/**
 	 * Create regions for each block in a program, without relocation, and map the program in
 	 * 
@@ -140,17 +131,15 @@ public enum ProgramEmulationUtils {
 	 * A transaction must already be started on the destination trace.
 	 * 
 	 * @param snapshot the destination snapshot, usually 0
-	 * @param program the progam to load
+	 * @param program the program to load
 	 */
 	public static void loadExecutable(TraceSnapshot snapshot, Program program) {
 		Trace trace = snapshot.getTrace();
+		PathPattern patRegion = computePatternRegion(trace);
 		Map<AddressSpace, Extrema> extremaBySpace = new HashMap<>();
 		try {
 			for (MemoryBlock block : program.getMemory().getBlocks()) {
-				if (!block.isLoaded()) {
-					continue;
-				}
-				if (block.isOverlay()) {
+				if (!DebuggerStaticMappingUtils.isReal(block)) {
 					continue;
 				}
 				AddressRange range = new AddressRangeImpl(block.getStart(), block.getEnd());
@@ -159,17 +148,17 @@ public enum ProgramEmulationUtils {
 				String modName = getModuleName(program);
 
 				// TODO: Do I populate modules, since the mapping will already be done?
-				String path = "Modules[" + modName + "].Sections[" + block.getName() + "-" +
-					block.getStart() + "]";
+				String path = PathUtils.toString(patRegion
+						.applyKeys(block.getStart() + "-" + modName + ":" + block.getName())
+						.getSingletonPath());
 				trace.getMemoryManager()
 						.createRegion(path, snapshot.getKey(), range, getRegionFlags(block));
 			}
 			for (Extrema extrema : extremaBySpace.values()) {
 				DebuggerStaticMappingUtils.addMapping(
-					new DefaultTraceLocation(trace, null, Range.atLeast(snapshot.getKey()),
-						extrema.min),
-					new ProgramLocation(program, extrema.min),
-					extrema.max.subtract(extrema.min), false);
+					new DefaultTraceLocation(trace, null, Lifespan.nowOn(snapshot.getKey()),
+						extrema.getMin()),
+					new ProgramLocation(program, extrema.getMin()), extrema.getLength(), false);
 			}
 		}
 		catch (TraceOverlappedRegionException | DuplicateNameException
@@ -177,6 +166,28 @@ public enum ProgramEmulationUtils {
 			throw new AssertionError(e);
 		}
 		// N.B. Bytes will be loaded lazily
+	}
+
+	public static PathPattern computePattern(Trace trace, Class<? extends TargetObject> iface) {
+		TargetObjectSchema root = trace.getObjectManager().getRootSchema();
+		if (root == null) {
+			return new PathPattern(PathUtils.parse("Memory[]"));
+		}
+		PathMatcher matcher = root.searchFor(iface, true);
+		PathPattern pattern = matcher.getSingletonPattern();
+		if (pattern == null || pattern.countWildcards() != 1) {
+			throw new IllegalArgumentException(
+				"Cannot find unique " + iface.getSimpleName() + " container");
+		}
+		return pattern;
+	}
+
+	public static PathPattern computePatternRegion(Trace trace) {
+		return computePattern(trace, TargetMemoryRegion.class);
+	}
+
+	public static PathPattern computePatternThread(Trace trace) {
+		return computePattern(trace, TargetThread.class);
 	}
 
 	/**
@@ -191,12 +202,16 @@ public enum ProgramEmulationUtils {
 	 */
 	public static TraceThread spawnThread(Trace trace, long snap) {
 		TraceThreadManager tm = trace.getThreadManager();
+		PathPattern patThread = computePatternThread(trace);
 		long next = tm.getAllThreads().size();
-		while (!tm.getThreadsByPath("Threads[" + next + "]").isEmpty()) {
+		String path;
+		while (!tm.getThreadsByPath(path =
+			PathUtils.toString(patThread.applyKeys(Long.toString(next)).getSingletonPath()))
+				.isEmpty()) {
 			next++;
 		}
 		try {
-			return tm.createThread("Threads[" + next + "]", "[" + next + "]", snap);
+			return tm.createThread(path, "[" + next + "]", snap);
 		}
 		catch (DuplicateNameException e) {
 			throw new AssertionError(e);
@@ -212,11 +227,25 @@ public enum ProgramEmulationUtils {
 	 * @param program the program whose context to use
 	 * @param tracePc the program counter in the trace's memory map
 	 * @param programPc the program counter in the program's memory map
-	 * @param stack optionally, the region representing the thread's stack
+	 * @param stack optionally, the range for the thread's stack allocation
 	 */
 	public static void initializeRegisters(Trace trace, long snap, TraceThread thread,
-			Program program, Address tracePc, Address programPc, TraceMemoryRegion stack) {
+			Program program, Address tracePc, Address programPc, AddressRange stack) {
 		TraceMemoryManager memory = trace.getMemoryManager();
+		if (thread instanceof TraceObjectThread ot) {
+			TraceObject object = ot.getObject();
+			PathPredicates regsMatcher = object.getRoot()
+					.getTargetSchema()
+					.searchForRegisterContainer(0, object.getCanonicalPath().getKeyList());
+			if (regsMatcher.isEmpty()) {
+				throw new IllegalArgumentException("Cannot create register container");
+			}
+			for (PathPattern regsPattern : regsMatcher.getPatterns()) {
+				trace.getObjectManager()
+						.createObject(TraceObjectKeyPath.of(regsPattern.getSingletonPath()));
+				break;
+			}
+		}
 		TraceMemorySpace regSpace = memory.getMemoryRegisterSpace(thread, true);
 		if (program != null) {
 			ProgramContext ctx = program.getProgramContext();
@@ -241,7 +270,7 @@ public enum ProgramEmulationUtils {
 		if (stack != null) {
 			CompilerSpec cSpec = trace.getBaseCompilerSpec();
 			Address sp = cSpec.stackGrowsNegative()
-					? stack.getMaxAddress()
+					? stack.getMaxAddress().addWrap(1)
 					: stack.getMinAddress();
 			Register regSP = cSpec.getStackPointer();
 			if (regSP != null) {
@@ -254,30 +283,101 @@ public enum ProgramEmulationUtils {
 		}
 	}
 
+	public static AddressRange allocateStackCustom(Trace trace, long snap, TraceThread thread,
+			Program program) {
+		if (program == null) {
+			return null;
+		}
+		AddressSpace space = trace.getBaseCompilerSpec().getStackBaseSpace();
+		MemoryBlock stackBlock = program.getMemory().getBlock(BLOCK_NAME_STACK);
+		if (stackBlock == null) {
+			return null;
+		}
+		if (space != stackBlock.getStart().getAddressSpace().getPhysicalSpace()) {
+			Msg.showError(ProgramEmulationUtils.class, null, "Invalid STACK block",
+				"The STACK block must be in the stack's base space. Ignoring.");
+			return null;
+		}
+		AddressRange alloc = new AddressRangeImpl(
+			stackBlock.getStart().getPhysicalAddress(),
+			stackBlock.getEnd().getPhysicalAddress());
+		if (stackBlock.isOverlay() || DebuggerStaticMappingUtils.isReal(stackBlock)) {
+			return alloc;
+		}
+		PathPattern patRegion = computePatternRegion(trace);
+		String path = PathUtils.toString(
+			patRegion.applyKeys(stackBlock.getStart() + "-STACK")
+					.getSingletonPath());
+		TraceMemoryManager mm = trace.getMemoryManager();
+		try {
+			return mm.createRegion(path, snap, alloc,
+				TraceMemoryFlag.READ, TraceMemoryFlag.WRITE).getRange();
+		}
+		catch (TraceOverlappedRegionException e) {
+			Msg.showError(ProgramEmulationUtils.class, null, "Stack conflict",
+				("The STACK region %s conflicts with another: %s. " +
+					"You may need to initialize the stack pointer manually.").formatted(
+						alloc, e.getConflicts().iterator().next()));
+			return alloc;
+		}
+		catch (DuplicateNameException e) {
+			Msg.showError(ProgramEmulationUtils.class, null, "Stack conflict",
+				("A region already exists with the same name: %s. " +
+					"You may need to initialize the stack pointer manually.")
+							.formatted(path));
+			return alloc;
+		}
+	}
+
 	/**
 	 * Attempt to allocate a new stack region for the given thread
+	 * 
+	 * <p>
+	 * If successful, this will create a dynamic memory region representing the stack. If the stack
+	 * is specified by an override (STACK block) in the program, and that block overlays the image,
+	 * then no region is created.
 	 * 
 	 * @param trace the trace containing the stack and thread
 	 * @param snap the creation snap for the new region
 	 * @param thread the thread for which the stack is being allocated
+	 * @param program the program being emulated (to check for stack allocation override)
 	 * @param size the desired size of the region
-	 * @return the new region representing the allocated stack
+	 * @return the range allocated for the stack
 	 * 
 	 * @throws EmulatorOutOfMemoryException if the stack cannot be allocated
 	 */
-	public static TraceMemoryRegion allocateStack(Trace trace, long snap, TraceThread thread,
-			long size) {
+	public static AddressRange allocateStack(Trace trace, long snap, TraceThread thread,
+			Program program, long size) {
+		AddressRange custom = allocateStackCustom(trace, snap, thread, program);
+		if (custom != null) {
+			return custom;
+		}
+		// Otherwise, just search for an un-allocated block of the given size.
 		AddressSpace space = trace.getBaseCompilerSpec().getStackBaseSpace();
-		AddressSet except0 = new AddressSet(space.getAddress(0x1000), space.getMaxAddress());
+		Address max = space.getMaxAddress();
+		AddressSet eligible;
+		if (max.getOffsetAsBigInteger().compareTo(BigInteger.valueOf(0x1000)) < 0) {
+			eligible = new AddressSet(space.getMinAddress(), max);
+		}
+		else {
+			eligible = new AddressSet(space.getAddress(0x1000), max);
+		}
 		TraceMemoryManager mm = trace.getMemoryManager();
 		AddressSetView left =
-			new DifferenceAddressSetView(except0, mm.getRegionsAddressSet(snap));
+			new DifferenceAddressSetView(eligible, mm.getRegionsAddressSet(snap));
+		PathPattern patRegion = computePatternRegion(trace);
 		try {
 			for (AddressRange candidate : left) {
-				if (Long.compareUnsigned(candidate.getLength(), size) > 0) {
+				if (Long.compareUnsigned(candidate.getLength(), size) >= 0) {
 					AddressRange alloc = new AddressRangeImpl(candidate.getMinAddress(), size);
-					return mm.createRegion(thread.getPath() + ".Stack", snap, alloc,
-						TraceMemoryFlag.READ, TraceMemoryFlag.WRITE);
+					String threadName = PathUtils.isIndex(thread.getName())
+							? PathUtils.parseIndex(thread.getName())
+							: thread.getName();
+					String path = PathUtils.toString(
+						patRegion.applyKeys(alloc.getMinAddress() + "-stack " + threadName)
+								.getSingletonPath());
+					return mm.createRegion(path, snap, alloc,
+						TraceMemoryFlag.READ, TraceMemoryFlag.WRITE).getRange();
 				}
 			}
 		}
@@ -303,13 +403,14 @@ public enum ProgramEmulationUtils {
 		boolean success = false;
 		try {
 			trace = new DBTrace(getTraceName(program), program.getCompilerSpec(), consumer);
-			try (UndoableTransaction tid = UndoableTransaction.start(trace, "Emulate")) {
+			try (Transaction tx = trace.openTransaction("Emulate")) {
 				TraceSnapshot initial =
 					trace.getTimeManager().createSnapshot(EMULATION_STARTED_AT + pc);
 				long snap = initial.getKey();
 				loadExecutable(initial, program);
 				doLaunchEmulationThread(trace, snap, program, pc, pc);
 			}
+			trace.clearUndo();
 			success = true;
 			return trace;
 		}
@@ -336,7 +437,15 @@ public enum ProgramEmulationUtils {
 	public static TraceThread doLaunchEmulationThread(Trace trace, long snap, Program program,
 			Address tracePc, Address programPc) {
 		TraceThread thread = spawnThread(trace, snap);
-		TraceMemoryRegion stack = allocateStack(trace, snap, thread, 0x4000);
+		AddressRange stack;
+		try {
+			stack = allocateStack(trace, snap, thread, program, 0x4000);
+		}
+		catch (EmulatorOutOfMemoryException e) {
+			Msg.warn(ProgramEmulationUtils.class,
+				"Cannot allocate a stack. Please initialize manually.");
+			stack = null;
+		}
 		initializeRegisters(trace, snap, thread, program, tracePc, programPc, stack);
 		return thread;
 	}
@@ -347,8 +456,7 @@ public enum ProgramEmulationUtils {
 	 */
 	public static TraceThread launchEmulationThread(Trace trace, long snap, Program program,
 			Address tracePc, Address programPc) {
-		try (UndoableTransaction tid =
-			UndoableTransaction.start(trace, "Emulate new Thread")) {
+		try (Transaction tx = trace.openTransaction("Emulate new Thread")) {
 			TraceThread thread = doLaunchEmulationThread(trace, snap, program, tracePc, programPc);
 			return thread;
 		}

@@ -15,6 +15,8 @@
  */
 #include "translate.hh"
 
+namespace ghidra {
+
 AttributeId ATTRIB_CODE = AttributeId("code",43);
 AttributeId ATTRIB_CONTAIN = AttributeId("contain",44);
 AttributeId ATTRIB_DEFAULTSPACE = AttributeId("defaultspace",45);
@@ -849,19 +851,64 @@ void AddrSpaceManager::renormalizeJoinAddress(Address &addr,int4 size)
     return;
   }
   vector<VarnodeData> newPieces;
-  newPieces.push_back(joinRecord->pieces[pos1]);
   int4 sizeTrunc1 = (int4)(addr1.getOffset() - joinRecord->pieces[pos1].offset);
-  pos1 += 1;
-  while(pos1 <= pos2) {
+  int4 sizeTrunc2 = joinRecord->pieces[pos2].size - (int4)(addr2.getOffset() - joinRecord->pieces[pos2].offset) - 1;
+
+  if (pos2 < pos1) {		// Little endian
+    newPieces.push_back(joinRecord->pieces[pos2]);
+    pos2 += 1;
+    while(pos2 <= pos1) {
+      newPieces.push_back(joinRecord->pieces[pos2]);
+      pos2 += 1;
+    }
+    newPieces.back().offset = addr1.getOffset();
+    newPieces.back().size -= sizeTrunc1;
+    newPieces.front().size -= sizeTrunc2;
+  }
+  else {
     newPieces.push_back(joinRecord->pieces[pos1]);
     pos1 += 1;
+    while(pos1 <= pos2) {
+      newPieces.push_back(joinRecord->pieces[pos1]);
+      pos1 += 1;
+    }
+    newPieces.front().offset = addr1.getOffset();
+    newPieces.front().size -= sizeTrunc1;
+    newPieces.back().size -= sizeTrunc2;
   }
-  int4 sizeTrunc2 = joinRecord->pieces[pos2].size - (int4)(addr2.getOffset() - joinRecord->pieces[pos2].offset) - 1;
-  newPieces.front().offset = addr1.getOffset();
-  newPieces.front().size -= sizeTrunc1;
-  newPieces.back().size -= sizeTrunc2;
-  JoinRecord *newJoinRecord = findAddJoin(newPieces, size);
+  JoinRecord *newJoinRecord = findAddJoin(newPieces, 0);
   addr = Address(newJoinRecord->unified.space,newJoinRecord->unified.offset);
+}
+
+/// The string \e must contain a hexadecimal offset.  The offset may be optionally prepended with "0x".
+/// The string may optionally start with the name of the address space to associate with the offset, followed
+/// by ':' to separate it from the offset.  If the name is not present, the default data space is assumed.
+/// \param val is the string to parse
+/// \return the parsed address
+Address AddrSpaceManager::parseAddressSimple(const string &val)
+
+{
+  string::size_type col = val.find(':');
+  AddrSpace *spc;
+  if (col==string::npos) {
+    spc = getDefaultDataSpace();
+    col = 0;
+  }
+  else {
+    string spcName = val.substr(0,col);
+    spc = getSpaceByName(spcName);
+    if (spc == (AddrSpace *)0)
+      throw LowlevelError("Unknown address space: " + spcName);
+    col += 1;
+  }
+  if (col + 2 <= val.size()) {
+    if (val[col] == '0' && val[col+1] == 'x')
+      col += 2;
+  }
+  istringstream s(val.substr(col));
+  uintb off;
+  s >> hex >> off;
+  return Address(spc,AddrSpace::addressToByte(off, spc->getWordSize()));
 }
 
 /// This constructs only a shell for the Translate object.  It
@@ -932,3 +979,5 @@ void PcodeEmit::decodeOp(const Address &addr,Decoder &decoder)
   decoder.closeElement(elemId);
   dump(addr,(OpCode)opcode,outptr,invar,isize);
 }
+
+} // End namespace ghidra

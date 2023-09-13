@@ -15,8 +15,7 @@
  */
 package agent.gdb.pty.linux;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.*;
 import static org.junit.Assume.assumeTrue;
 
 import java.io.*;
@@ -26,6 +25,7 @@ import org.junit.Before;
 import org.junit.Test;
 
 import agent.gdb.pty.AbstractPtyTest;
+import agent.gdb.pty.PtyChild.Echo;
 import agent.gdb.pty.PtySession;
 import ghidra.dbg.testutil.DummyProc;
 import ghidra.framework.OperatingSystem;
@@ -84,10 +84,9 @@ public class LinuxPtyTest extends AbstractPtyTest {
 			PtySession dies =
 				pty.getChild().session(new String[] { "thisHadBetterNotExist" }, null);
 			/**
-			 * NOTE: Java subprocess dies with code 1 on unhandled exception. TODO: Is there a nice
-			 * way to distinguish whether the code is from java or the execed image?
+			 * Choice of 127 is based on bash setting "exit code" to 127 for "command not found"
 			 */
-			assertEquals(1, dies.waitExited());
+			assertEquals(127, dies.waitExited());
 		}
 	}
 
@@ -176,6 +175,40 @@ public class LinuxPtyTest extends AbstractPtyTest {
 			assertTrue(Set.of("BASH:exit 3", "exit 3").contains(reader.readLine()));
 
 			assertEquals(3, bash.waitExited());
+		}
+	}
+
+	@Test
+	public void testLocalEchoOn() throws IOException {
+		try (LinuxPty pty = LinuxPty.openpty()) {
+			pty.getChild().nullSession();
+
+			PrintWriter writer = new PrintWriter(pty.getParent().getOutputStream());
+			BufferedReader reader =
+				new BufferedReader(new InputStreamReader(pty.getParent().getInputStream()));
+
+			writer.println("Hello, World!");
+			writer.flush();
+			assertEquals("Hello, World!", reader.readLine());
+		}
+	}
+
+	@Test
+	public void testLocalEchoOff() throws IOException {
+		try (LinuxPty pty = LinuxPty.openpty()) {
+			pty.getChild().nullSession(Echo.OFF);
+
+			PrintWriter writerP = new PrintWriter(pty.getParent().getOutputStream());
+			PrintWriter writerC = new PrintWriter(pty.getChild().getOutputStream());
+			BufferedReader reader =
+				new BufferedReader(new InputStreamReader(pty.getParent().getInputStream()));
+
+			writerP.println("Hello, World!");
+			writerP.flush();
+			writerC.println("Good bye!");
+			writerC.flush();
+
+			assertEquals("Good bye!", reader.readLine());
 		}
 	}
 }

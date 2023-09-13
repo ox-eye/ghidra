@@ -15,8 +15,13 @@
  */
 #include <iostream>
 #include <cstdlib>
-
 #include "libdecomp.hh"
+
+namespace ghidra {
+
+using std::cin;
+using std::cout;
+using std::cerr;
 
 class IfcLoadFile : public IfaceDecompCommand {
 public:
@@ -166,9 +171,13 @@ void IfcRestore::execute(istream &s)
   *status->optr << savefile << " successfully loaded: " << dcp->conf->getDescription() << endl;
 }
 
+} // End namespace ghidra
+
 int main(int argc,char **argv)
 
 {
+  using namespace ghidra;
+
   const char *initscript = (const char *)0;
 
   {
@@ -214,7 +223,6 @@ int main(int argc,char **argv)
 
   if (initscript != (const char *)0) {
     try {
-      status->setErrorIsDone(true);
       status->pushScript(initscript,"init> ");
     } catch(IfaceParseError &err) {
       *status->optr << err.explain << endl;
@@ -241,4 +249,3 @@ int main(int argc,char **argv)
 
   exit(retval);
 }
-

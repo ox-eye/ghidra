@@ -311,6 +311,11 @@ public class PackedDecode implements Decoder {
 	}
 
 	@Override
+	public int getIndexedAttributeId(AttributeId attribId) throws DecoderException {
+		return AttributeId.ATTRIB_UNKNOWN.id();
+	}
+
+	@Override
 	public void rewindAttributes() {
 		curPos.copy(startPos);
 		attributeRead = true;
@@ -366,6 +371,41 @@ public class PackedDecode implements Decoder {
 	public long readSignedInteger(AttributeId attribId) throws DecoderException {
 		findMatchingAttribute(attribId);
 		long res = readSignedInteger();
+		curPos.copy(startPos);
+		return res;
+	}
+
+	@Override
+	public long readSignedIntegerExpectString(String expect, long expectval)
+			throws DecoderException {
+		long res;
+		LinkedByteBuffer.Position tmpPos = new LinkedByteBuffer.Position();
+		tmpPos.copy(curPos);
+		byte header1 = tmpPos.getNextByte();
+		if ((header1 & HEADEREXTEND_MASK) != 0) {
+			tmpPos.getNextByte();
+		}
+		byte typeByte = tmpPos.getNextByte();
+		int typeCode = typeByte >> TYPECODE_SHIFT;
+		if (typeCode == TYPECODE_STRING) {
+			String val = readString();
+			if (!val.equals(expect)) {
+				throw new DecoderException(
+					"Expecting string \"" + expect + "\" but read \"" + val + "\"");
+			}
+			res = expectval;
+		}
+		else {
+			res = readSignedInteger();
+		}
+		return res;
+	}
+
+	@Override
+	public long readSignedIntegerExpectString(AttributeId attribId, String expect, long expectval)
+			throws DecoderException {
+		findMatchingAttribute(attribId);
+		long res = readSignedIntegerExpectString(expect, expectval);
 		curPos.copy(startPos);
 		return res;
 	}

@@ -31,6 +31,8 @@ import ghidra.program.model.lang.*;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.pcode.*;
+import ghidra.program.model.symbol.IdentityNameTransformer;
+import ghidra.program.model.symbol.NameTransformer;
 import ghidra.util.Msg;
 import ghidra.util.task.CancelledListener;
 import ghidra.util.task.TaskMonitor;
@@ -276,6 +278,7 @@ public class DecompInterface {
 		xmlEncode.clear();
 		compilerSpec.encode(xmlEncode);
 		String cspecxml = xmlEncode.toString();
+		baseEncodingSet = new EncodeDecodeSet(program);
 
 		decompCallback.setNativeMessage(null);
 		decompProcess.registerProgram(decompCallback, pspecxml, cspecxml, tspec, coretypes,
@@ -369,8 +372,9 @@ public class DecompInterface {
 		}
 		compilerSpec = spec;
 
-		dtmanage = new PcodeDataTypeManager(prog);
-		baseEncodingSet = new EncodeDecodeSet(prog);
+		NameTransformer transformer =
+			(options == null) ? new IdentityNameTransformer() : options.getNameTransformer();
+		dtmanage = new PcodeDataTypeManager(prog, transformer);
 		try {
 			decompCallback =
 				new DecompileCallback(prog, pcodelanguage, program.getCompilerSpec(), dtmanage);
@@ -642,6 +646,9 @@ public class DecompInterface {
 	 */
 	public synchronized boolean setOptions(DecompileOptions options) {
 		this.options = options;
+		if (dtmanage != null) {
+			dtmanage.setNameTransformer(options.getNameTransformer());
+		}
 		decompileMessage = "";
 		// Property can be set before process exists
 		if (decompProcess == null) {
@@ -756,6 +763,8 @@ public class DecompInterface {
 		if (monitor != null) {
 			monitor.addCancelledListener(monitorListener);
 		}
+
+		dtmanage.clearTemporaryIds();
 
 		if (program == null) {
 			return new DecompileResults(func, pcodelanguage, null, dtmanage, decompileMessage, null,

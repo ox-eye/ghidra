@@ -114,7 +114,7 @@ public class MemoryMapProvider1Test extends AbstractGhidraHeadedIntegrationTest 
 		table.addRowSelectionInterval(0, 0);
 		Set<DockingActionIf> actions = getActionsByOwner(tool, plugin.getName());
 		for (DockingActionIf action : actions) {
-			if (action.getName().equals("Merge Blocks")) {
+			if (action.getName().equals("Merge Blocks") || action.getName().equals("Local Menu")) {
 				assertFalse(action.isEnabled());
 			}
 			else {
@@ -133,7 +133,8 @@ public class MemoryMapProvider1Test extends AbstractGhidraHeadedIntegrationTest 
 			String name = action.getName();
 			if (name.equals("Add Block") || name.equals("Merge Blocks") ||
 				name.equals("Delete Block") || name.equals("Set Image Base") ||
-				name.equals("Memory Map") || name.equals("Close Window")) {
+				name.equals("Memory Map") || name.equals("Close Window") ||
+				name.equals("Make Selection")) {
 				assertTrue("Action should be enabled for  a multi-row selection - '" + name + "'",
 					action.isEnabled());
 			}
@@ -201,19 +202,19 @@ public class MemoryMapProvider1Test extends AbstractGhidraHeadedIntegrationTest 
 		memory.createUninitializedBlock(".test", getAddr(0), 0x100, false);
 		program.endTransaction(transactionID, true);
 		program.flushEvents();
-		waitForPostedSwingRunnables();
+		waitForSwing();
 
 		assertEquals(Boolean.FALSE, model.getValueAt(0, MemoryMapModel.INIT));
-		waitForPostedSwingRunnables();
+		waitForSwing();
 
 		Rectangle rect = table.getCellRect(0, MemoryMapModel.INIT, true);
 		clickMouse(table, 1, rect.x, rect.y, 2, 0);
-		waitForPostedSwingRunnables();
+		waitForSwing();
 
 		NumberInputDialog dialog = waitForDialogComponent(NumberInputDialog.class);
 		assertNotNull(dialog);
 		invokeInstanceMethod("okCallback", dialog);
-		waitForPostedSwingRunnables();
+		waitForSwing();
 
 		assertEquals(Boolean.TRUE, model.getValueAt(0, MemoryMapModel.INIT));
 
@@ -229,12 +230,12 @@ public class MemoryMapProvider1Test extends AbstractGhidraHeadedIntegrationTest 
 
 		Rectangle rect = table.getCellRect(0, MemoryMapModel.INIT, true);
 		clickMouse(table, 1, rect.x, rect.y, 2, 0);
-		waitForPostedSwingRunnables();
+		waitForSwing();
 
 		OptionDialog dialog = waitForDialogComponent(OptionDialog.class);
 		assertNotNull(dialog);
 		invokeInstanceMethod("okCallback", dialog);
-		waitForPostedSwingRunnables();
+		waitForSwing();
 
 		waitForBusyTool(tool);
 
@@ -248,7 +249,7 @@ public class MemoryMapProvider1Test extends AbstractGhidraHeadedIntegrationTest 
 		table.addRowSelectionInterval(0, 0);
 		Rectangle rect = table.getCellRect(0, MemoryMapModel.NAME, true);
 		clickMouse(table, 1, rect.x, rect.y, 2, 0);
-		waitForPostedSwingRunnables();
+		waitForSwing();
 
 		SwingUtilities.invokeAndWait(() -> {
 			int row = 0;
@@ -260,7 +261,7 @@ public class MemoryMapProvider1Test extends AbstractGhidraHeadedIntegrationTest 
 			tf.setText(".test");
 			editor.stopCellEditing();
 		});
-		waitForPostedSwingRunnables();
+		waitForSwing();
 		assertEquals(".test", model.getValueAt(0, MemoryMapModel.NAME));
 	}
 
@@ -271,7 +272,7 @@ public class MemoryMapProvider1Test extends AbstractGhidraHeadedIntegrationTest 
 //		table.addRowSelectionInterval(0, 0);
 //		Rectangle rect = table.getCellRect(0, MemoryMapModel.NAME, true);
 //		clickMouse(table, 1, rect.x, rect.y, 2, 0);
-//		waitForPostedSwingRunnables();
+//		waitForSwing();
 //
 //		SwingUtilities.invokeLater(() -> {
 //			int row = 0;
@@ -283,7 +284,7 @@ public class MemoryMapProvider1Test extends AbstractGhidraHeadedIntegrationTest 
 //			tf.setText(".data");
 //			editor.stopCellEditing();
 //		});
-//		waitForPostedSwingRunnables();
+//		waitForSwing();
 //		assertEquals(".text", model.getValueAt(0, MemoryMapModel.NAME));
 //
 //		final OptionDialog d =
@@ -302,7 +303,7 @@ public class MemoryMapProvider1Test extends AbstractGhidraHeadedIntegrationTest 
 		table.addRowSelectionInterval(0, 0);
 		Rectangle rect = table.getCellRect(0, MemoryMapModel.COMMENT, true);
 		clickMouse(table, 1, rect.x, rect.y, 2, 0);
-		waitForPostedSwingRunnables();
+		waitForSwing();
 
 		SwingUtilities.invokeAndWait(() -> {
 			int row = 0;
@@ -314,7 +315,7 @@ public class MemoryMapProvider1Test extends AbstractGhidraHeadedIntegrationTest 
 			tf.setText("these are test comments");
 			editor.stopCellEditing();
 		});
-		waitForPostedSwingRunnables();
+		waitForSwing();
 		assertEquals("these are test comments", model.getValueAt(0, MemoryMapModel.COMMENT));
 	}
 
@@ -478,7 +479,7 @@ public class MemoryMapProvider1Test extends AbstractGhidraHeadedIntegrationTest 
 	@Test
 	public void testSortBlockType() throws Exception {
 
-		// add a bit overlay block, live block, and an unitialized block
+		// add a bit overlay block, live block, and an uninitialized block
 		tx(program, () -> {
 			memory.createBitMappedBlock(".Bit", getAddr(0), getAddr(0x01001000), 0x100, false);
 			memory.createUninitializedBlock(".Uninit", getAddr(0x3000), 0x200, false);
@@ -504,7 +505,7 @@ public class MemoryMapProvider1Test extends AbstractGhidraHeadedIntegrationTest 
 
 	@Test
 	public void testSortBlockTypeDescending() throws Exception {
-		// add a bit overlay block, live block, and an unitialized block
+		// add a bit overlay block, live block, and an uninitialized block
 		tx(program, () -> {
 			memory.createBitMappedBlock(".Bit", getAddr(0), getAddr(0x01001000), 0x100, false);
 			memory.createUninitializedBlock(".Uninit", getAddr(0x3000), 0x200, false);
@@ -670,11 +671,10 @@ public class MemoryMapProvider1Test extends AbstractGhidraHeadedIntegrationTest 
 	private void showProvider() {
 		DockingActionIf action = getAction(plugin, "Memory Map");
 		performAction(action, true);
-		waitForPostedSwingRunnables();
+		waitForSwing();
 		provider = plugin.getMemoryMapProvider();
 		table = provider.getTable();
-		model = (MemoryMapModel) table.getModel();
-
+		model = provider.getModel();
 	}
 
 	private Address getAddr(long offset) {

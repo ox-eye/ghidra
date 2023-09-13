@@ -38,8 +38,8 @@ public abstract class DomainObjectAdapter implements DomainObject {
 	protected final static String DEFAULT_NAME = "untitled";
 
 	private static Class<?> defaultDomainObjClass; // Domain object implementation mapped to unknown content type
-	private static HashMap<String, ContentHandler> contentHandlerTypeMap; // maps content-type string to handler
-	private static HashMap<Class<?>, ContentHandler> contentHandlerClassMap; // maps domain object class to handler
+	private static HashMap<String, ContentHandler<?>> contentHandlerTypeMap; // maps content-type string to handler
+	private static HashMap<Class<?>, ContentHandler<?>> contentHandlerClassMap; // maps domain object class to handler
 	private static ChangeListener contentHandlerUpdateListener = new ChangeListener() {
 		@Override
 		public void stateChanged(ChangeEvent e) {
@@ -54,8 +54,7 @@ public abstract class DomainObjectAdapter implements DomainObject {
 	protected Map<EventQueueID, DomainObjectChangeSupport> changeSupportMap =
 		new ConcurrentHashMap<EventQueueID, DomainObjectChangeSupport>();
 	private volatile boolean eventsEnabled = true;
-	private Set<DomainObjectClosedListener> closeListeners =
-		new CopyOnWriteArraySet<DomainObjectClosedListener>();
+	private Set<DomainObjectClosedListener> closeListeners = new CopyOnWriteArraySet<>();
 
 	private ArrayList<Object> consumers;
 	protected Map<String, String> metadata = new LinkedHashMap<String, String>();
@@ -210,7 +209,7 @@ public abstract class DomainObjectAdapter implements DomainObject {
 
 	private void notifyCloseListeners() {
 		for (DomainObjectClosedListener listener : closeListeners) {
-			listener.domainObjectClosed();
+			listener.domainObjectClosed(this);
 		}
 		closeListeners.clear();
 	}
@@ -399,7 +398,7 @@ public abstract class DomainObjectAdapter implements DomainObject {
 				contentHandlerTypeMap.remove(null);
 			}
 			else {
-				ContentHandler ch = contentHandlerClassMap.get(doClass);
+				ContentHandler<?> ch = contentHandlerClassMap.get(doClass);
 				if (ch != null) {
 					contentHandlerTypeMap.put(null, ch);
 				}
@@ -414,9 +413,9 @@ public abstract class DomainObjectAdapter implements DomainObject {
 	 * @return content handler
 	 * @throws IOException if no content handler can be found
 	 */
-	static synchronized ContentHandler getContentHandler(String contentType) throws IOException {
+	static synchronized ContentHandler<?> getContentHandler(String contentType) throws IOException {
 		checkContentHandlerMaps();
-		ContentHandler ch = contentHandlerTypeMap.get(contentType);
+		ContentHandler<?> ch = contentHandlerTypeMap.get(contentType);
 		if (ch == null) {
 			throw new IOException("Content handler not found for " + contentType);
 		}
@@ -430,10 +429,10 @@ public abstract class DomainObjectAdapter implements DomainObject {
 	 * @return content handler
 	 * @throws IOException if no content handler can be found
 	 */
-	public static synchronized ContentHandler getContentHandler(DomainObject dobj)
+	public static synchronized ContentHandler<?> getContentHandler(DomainObject dobj)
 			throws IOException {
 		checkContentHandlerMaps();
-		ContentHandler ch = contentHandlerClassMap.get(dobj.getClass());
+		ContentHandler<?> ch = contentHandlerClassMap.get(dobj.getClass());
 		if (ch == null) {
 			throw new IOException("Content handler not found for " + dobj.getClass().getName());
 		}
@@ -450,17 +449,15 @@ public abstract class DomainObjectAdapter implements DomainObject {
 	}
 
 	private synchronized static void getContentHandlers() {
-		contentHandlerClassMap = new HashMap<Class<?>, ContentHandler>();
-		contentHandlerTypeMap = new HashMap<String, ContentHandler>();
+		contentHandlerClassMap = new HashMap<Class<?>, ContentHandler<?>>();
+		contentHandlerTypeMap = new HashMap<String, ContentHandler<?>>();
 
+		@SuppressWarnings("rawtypes")
 		List<ContentHandler> handlers = ClassSearcher.getInstances(ContentHandler.class);
-		for (ContentHandler ch : handlers) {
-			String type = ch.getContentType();
-			Class<?> DOClass = ch.getDomainObjectClass();
-			if (type != null && DOClass != null) {
-				contentHandlerClassMap.put(DOClass, ch);
-				contentHandlerTypeMap.put(type, ch);
-				continue;
+		for (ContentHandler<?> ch : handlers) {
+			contentHandlerTypeMap.put(ch.getContentType(), ch);
+			if (!(ch instanceof LinkHandler<?>)) {
+				contentHandlerClassMap.put(ch.getDomainObjectClass(), ch);
 			}
 		}
 		setDefaultContentClass(defaultDomainObjClass);

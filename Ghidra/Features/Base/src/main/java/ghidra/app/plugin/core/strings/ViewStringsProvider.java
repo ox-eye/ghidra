@@ -28,7 +28,7 @@ import javax.swing.table.TableColumn;
 import docking.ActionContext;
 import docking.widgets.table.GTableTextCellEditor;
 import docking.widgets.table.threaded.ThreadedTableModelListener;
-import ghidra.app.services.GoToService;
+import generic.theme.GIcon;
 import ghidra.framework.plugintool.ComponentProviderAdapter;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.data.DataUtilities;
@@ -40,14 +40,13 @@ import ghidra.program.util.ProgramSelection;
 import ghidra.util.HelpLocation;
 import ghidra.util.table.*;
 import ghidra.util.task.TaskMonitor;
-import resources.ResourceManager;
 
 /**
  * Provider for the defined strings table.
  */
 public class ViewStringsProvider extends ComponentProviderAdapter {
 
-	public static final ImageIcon ICON = ResourceManager.loadImage("images/dataW.gif");
+	public static final Icon ICON = new GIcon("icon.plugin.viewstrings.provider");
 
 	private GhidraThreadedTablePanel<ProgramLocation> threadedTablePanel;
 	private GhidraTableFilterPanel<ProgramLocation> filterPanel;
@@ -155,13 +154,13 @@ public class ViewStringsProvider extends ComponentProviderAdapter {
 				// ignore
 			}
 		});
-		TableColumn stringRepCol = table.getColumnModel().getColumn(
-			ViewStringsTableModel.COLUMNS.STRING_REP_COL.ordinal());
+		TableColumn stringRepCol = table.getColumnModel()
+				.getColumn(
+					ViewStringsTableModel.COLUMNS.STRING_REP_COL.ordinal());
 
 		stringRepCol.setCellEditor(new StringRepCellEditor());
 
-		GoToService goToService = tool.getService(GoToService.class);
-		table.installNavigation(goToService, goToService.getDefaultNavigatable());
+		table.installNavigation(tool);
 
 		filterPanel = new GhidraTableFilterPanel<>(table, stringModel);
 

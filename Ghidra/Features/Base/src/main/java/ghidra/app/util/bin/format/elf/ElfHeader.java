@@ -15,21 +15,17 @@
  */
 package ghidra.app.util.bin.format.elf;
 
+import java.io.IOException;
 import java.util.*;
 import java.util.function.Consumer;
 
-import java.io.IOException;
-import java.io.RandomAccessFile;
-
 import ghidra.app.util.bin.*;
-import ghidra.app.util.bin.format.Writeable;
 import ghidra.app.util.bin.format.elf.ElfRelocationTable.TableFormat;
 import ghidra.app.util.bin.format.elf.extend.ElfExtensionFactory;
 import ghidra.app.util.bin.format.elf.extend.ElfLoadAdapter;
 import ghidra.program.model.data.*;
 import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.mem.MemoryBlock;
-import ghidra.util.DataConverter;
 import ghidra.util.Msg;
 import ghidra.util.exception.AssertException;
 import ghidra.util.exception.NotFoundException;
@@ -38,7 +34,7 @@ import ghidra.util.exception.NotFoundException;
  * A class to represent the Executable and Linking Format (ELF)
  * header and specification.
  */
-public class ElfHeader implements StructConverter, Writeable {
+public class ElfHeader implements StructConverter {
 
 	private static final int MAX_HEADERS_TO_CHECK_FOR_IMAGEBASE = 20;
 
@@ -56,9 +52,11 @@ public class ElfHeader implements StructConverter, Writeable {
 	private String e_ident_magic_str; //magic string
 	private byte e_ident_class; //file class
 	private byte e_ident_data; //data encoding
+	@SuppressWarnings("unused")
 	private byte e_ident_version; //file version
 	private byte e_ident_osabi; //operating system and abi
 	private byte e_ident_abiversion; //abi version
+	@SuppressWarnings("unused")
 	private byte[] e_ident_pad; //padding
 	private short e_type; //object file type
 	private short e_machine; //target architecture
@@ -137,21 +135,19 @@ public class ElfHeader implements StructConverter, Writeable {
 	protected void initElfHeader() throws ElfException {
 		try {
 
+			if (!Arrays.equals(ElfConstants.MAGIC_BYTES,
+				provider.readBytes(0, ElfConstants.MAGIC_BYTES.length))) {
+				throw new ElfException("Not a valid ELF executable.");
+			}
+			e_ident_magic_num = ElfConstants.MAGIC_NUM;
+			e_ident_magic_str = ElfConstants.MAGIC_STR;
+
 			determineHeaderEndianess();
 
 			// reader uses unbounded provider wrapper to allow handling of missing/truncated headers
 			reader = new BinaryReader(new UnlimitedByteProviderWrapper(provider),
 				hasLittleEndianHeaders);
-
-			e_ident_magic_num = reader.readNextByte();
-			e_ident_magic_str = reader.readNextAsciiString(ElfConstants.MAGIC_STR_LEN);
-
-			boolean magicMatch = ElfConstants.MAGIC_NUM == e_ident_magic_num &&
-				ElfConstants.MAGIC_STR.equalsIgnoreCase(e_ident_magic_str);
-
-			if (!magicMatch) {
-				throw new ElfException("Not a valid ELF executable.");
-			}
+			reader.setPointerIndex(ElfConstants.MAGIC_BYTES.length);
 
 			e_ident_class = reader.readNextByte();
 			e_ident_data = reader.readNextByte();
@@ -500,6 +496,12 @@ public class ElfHeader implements StructConverter, Writeable {
 					}
 				}
 
+				if (section.isInvalidOffset()) {
+					Msg.debug(this, "Skipping Elf relocation table section with invalid offset " +
+						section.getNameAsString());
+					return;
+				}
+
 				int link = section.getLink(); // section index of associated symbol table
 				int info = section.getInfo(); // section index of section to which relocations apply (relocation offset base)
 
@@ -519,22 +521,18 @@ public class ElfHeader implements StructConverter, Writeable {
 				}
 
 				ElfSymbolTable symbolTable = getSymbolTable(symbolTableSection);
-				if (symbolTable == null) {
-					throw new NotFoundException("Referenced relocation symbol section not found.");
-				}
 
 				boolean addendTypeReloc =
 					(sectionHeaderType == ElfSectionHeaderConstants.SHT_RELA ||
 						sectionHeaderType == ElfSectionHeaderConstants.SHT_ANDROID_RELA);
 
-				Msg.debug(this,
-					"Elf relocation table section " + section.getNameAsString() +
-						" linked to symbol table section " + symbolTableSection.getNameAsString() +
-						" affecting " + relocaBaseName);
-
-				if (section.getOffset() < 0) {
-					return;
+				String details = "Elf relocation table section " + section.getNameAsString();
+				if (symbolTableSection != null) {
+					details +=
+						" linked to symbol table section " + symbolTableSection.getNameAsString();
 				}
+				details += " affecting " + relocaBaseName;
+				Msg.debug(this, details);
 
 				ElfRelocationTable.TableFormat format = TableFormat.DEFAULT;
 				if (sectionHeaderType == ElfSectionHeaderConstants.SHT_ANDROID_REL ||
@@ -614,13 +612,7 @@ public class ElfHeader implements StructConverter, Writeable {
 					Long.toHexString(relocTableAddr));
 				return;
 			}
-			if (relocTableLoadHeader.getOffset() < 0) {
-				return;
-			}
-
-			if (dynamicSymbolTable == null) {
-				errorConsumer.accept("Failed to process " + relocTableAddrType.name +
-					", missing dynamic symbol table");
+			if (relocTableLoadHeader.isInvalidOffset()) {
 				return;
 			}
 
@@ -881,7 +873,8 @@ public class ElfHeader implements StructConverter, Writeable {
 		for (ElfSectionHeader symbolTableSectionHeader : sectionHeaders) {
 			if (symbolTableSectionHeader.getType() == ElfSectionHeaderConstants.SHT_SYMTAB ||
 				symbolTableSectionHeader.getType() == ElfSectionHeaderConstants.SHT_DYNSYM) {
-				if (symbolTableSectionHeader.getOffset() < 0) {
+				// || symbolTableSectionHeader.getType() == ElfSectionHeaderConstants.SHT_SUNW_LDYNSYM) {
+				if (symbolTableSectionHeader.isInvalidOffset()) {
 					continue;
 				}
 
@@ -924,12 +917,26 @@ public class ElfHeader implements StructConverter, Writeable {
 		symbolTableList.toArray(symbolTables);
 	}
 
+	private ElfDynamicType getDynamicHashTableType() {
+		if (dynamicTable.containsDynamicValue(ElfDynamicType.DT_HASH)) {
+			return ElfDynamicType.DT_HASH;
+		}
+		if (dynamicTable.containsDynamicValue(ElfDynamicType.DT_GNU_HASH)) {
+			return ElfDynamicType.DT_GNU_HASH;
+		}
+		if (dynamicTable.containsDynamicValue(ElfDynamicType.DT_GNU_XHASH)) {
+			return ElfDynamicType.DT_GNU_XHASH;
+		}
+		return null;
+	}
+
 	private ElfSymbolTable parseDynamicSymbolTable() throws IOException {
+
+		ElfDynamicType dynamicHashType = getDynamicHashTableType();
 
 		if (!dynamicTable.containsDynamicValue(ElfDynamicType.DT_SYMTAB) ||
 			!dynamicTable.containsDynamicValue(ElfDynamicType.DT_SYMENT) ||
-			!(dynamicTable.containsDynamicValue(ElfDynamicType.DT_HASH) ||
-				dynamicTable.containsDynamicValue(ElfDynamicType.DT_GNU_HASH))) {
+			dynamicHashType == null) {
 			if (dynamicStringTable != null) {
 				Msg.warn(this, "Failed to parse DT_SYMTAB, missing dynamic dependency");
 			}
@@ -956,11 +963,9 @@ public class ElfHeader implements StructConverter, Writeable {
 			tableAddr = adjustAddressForPrelink(tableAddr);
 			long tableEntrySize = dynamicTable.getDynamicValue(ElfDynamicType.DT_SYMENT);
 
-			// Use dynamic symbol hash table DT_HASH or DT_GNU_HASH to determine symbol table count/length
-			boolean useGnuHash = dynamicTable.containsDynamicValue(ElfDynamicType.DT_GNU_HASH);
-			long hashTableAddr =
-				useGnuHash ? dynamicTable.getDynamicValue(ElfDynamicType.DT_GNU_HASH)
-						: dynamicTable.getDynamicValue(ElfDynamicType.DT_HASH);
+			// Use dynamic symbol hash table DT_HASH, DT_GNU_HASH, or DT_GNU_XHASH to 
+			// determine symbol table count/length
+			long hashTableAddr = dynamicTable.getDynamicValue(dynamicHashType);
 			hashTableAddr = adjustAddressForPrelink(hashTableAddr);
 
 			ElfProgramHeader symbolTableLoadHeader = getProgramLoadHeaderContaining(tableAddr);
@@ -971,7 +976,7 @@ public class ElfHeader implements StructConverter, Writeable {
 			}
 			ElfProgramHeader hashTableLoadHeader = getProgramLoadHeaderContaining(hashTableAddr);
 			if (hashTableLoadHeader == null) {
-				errorConsumer.accept("Failed to locate DT_HASH or DT_GNU_HASH in memory at 0x" +
+				errorConsumer.accept("Failed to locate DT_HASH, DT_GNU_HASH, or DT_GNU_XHASH in memory at 0x" +
 					Long.toHexString(hashTableAddr));
 				return null;
 			}
@@ -982,8 +987,11 @@ public class ElfHeader implements StructConverter, Writeable {
 			// determine symbol count from dynamic symbol hash table
 			int symCount;
 			long symbolHashTableOffset = hashTableLoadHeader.getOffset(hashTableAddr);
-			if (useGnuHash) {
+			if (dynamicHashType == ElfDynamicType.DT_GNU_HASH) {
 				symCount = deriveGnuHashDynamicSymbolCount(symbolHashTableOffset);
+			}
+			else if (dynamicHashType == ElfDynamicType.DT_GNU_XHASH) {
+				symCount = deriveGnuXHashDynamicSymbolCount(symbolHashTableOffset);
 			}
 			else {
 				// DT_HASH table, nchain corresponds is same as symbol count
@@ -1039,6 +1047,22 @@ public class ElfHeader implements StructConverter, Writeable {
 			chainOffset += 4;
 		}
 		return maxSymbolIndex;
+	}
+
+	/**
+	 * Walk DT_GNU_XHASH table to determine dynamic symbol count
+	 * @param gnuHashTableOffset DT_GNU_XHASH table file offset
+	 * @return dynamic symbol count
+	 * @throws IOException file read error
+	 */
+	private int deriveGnuXHashDynamicSymbolCount(long gnuHashTableOffset) throws IOException {
+		// Elf32_Word  ngnusyms;  // number of entries in chains (and xlat); dynsymcount=symndx+ngnusyms
+		// Elf32_Word  nbuckets;  // number of hash table buckets
+		// Elf32_Word  symndx;  // number of initial .dynsym entires skipped in chains[] (and xlat[])
+		int ngnusyms = reader.readInt(gnuHashTableOffset);
+		int symndx = reader.readInt(gnuHashTableOffset + 8);
+
+		return symndx + ngnusyms;
 	}
 
 	/**
@@ -1621,7 +1645,8 @@ public class ElfHeader implements StructConverter, Writeable {
 			long fileRangeLength) {
 		long maxOffset = fileOffset + fileRangeLength - 1;
 		for (ElfSectionHeader section : sectionHeaders) {
-			if (section.getType() == ElfSectionHeaderConstants.SHT_NULL) {
+			if (section.getType() == ElfSectionHeaderConstants.SHT_NULL ||
+				section.isInvalidOffset()) {
 				continue;
 			}
 			long size = section.getSize();
@@ -1748,7 +1773,8 @@ public class ElfHeader implements StructConverter, Writeable {
 	public ElfProgramHeader getProgramLoadHeaderContainingFileOffset(long offset) {
 		for (ElfProgramHeader programHeader : programHeaders) {
 			if (programHeader == null ||
-				programHeader.getType() != ElfProgramHeaderConstants.PT_LOAD) {
+				programHeader.getType() != ElfProgramHeaderConstants.PT_LOAD ||
+				programHeader.isInvalidOffset()) {
 				continue;
 			}
 			long start = programHeader.getOffset();
@@ -2047,68 +2073,6 @@ public class ElfHeader implements StructConverter, Writeable {
 
 		e_phnum = programHeaders.length;
 
-	}
-
-	/**
-	 * @see ghidra.app.util.bin.format.Writeable#write(java.io.RandomAccessFile, ghidra.util.DataConverter)
-	 */
-	@Override
-	public void write(RandomAccessFile raf, DataConverter dc) throws IOException {
-		raf.seek(0);
-		raf.writeByte(e_ident_magic_num);
-		raf.write(e_ident_magic_str.getBytes());
-		raf.writeByte(e_ident_class);
-		raf.writeByte(e_ident_data);
-		raf.writeByte(e_ident_version);
-		raf.writeByte(e_ident_osabi);
-		raf.writeByte(e_ident_abiversion);
-		raf.write(e_ident_pad);
-		raf.write(dc.getBytes(e_type));
-		raf.write(dc.getBytes(e_machine));
-		raf.write(dc.getBytes(e_version));
-
-		if (is32Bit()) {
-			raf.write(dc.getBytes((int) e_entry));
-			raf.write(dc.getBytes((int) e_phoff));
-			raf.write(dc.getBytes((int) e_shoff));
-		}
-		else if (is64Bit()) {
-			raf.write(dc.getBytes(e_entry));
-			raf.write(dc.getBytes(e_phoff));
-			raf.write(dc.getBytes(e_shoff));
-		}
-
-		raf.write(dc.getBytes(e_flags));
-		raf.write(dc.getBytes(e_ehsize));
-		raf.write(dc.getBytes(e_phentsize));
-		if (e_phnum >= Short.toUnsignedInt(ElfConstants.PN_XNUM)) {
-			throw new IOException(
-				"Unsupported program header count serialization: " + e_phnum);
-		}
-		raf.write(dc.getBytes(e_phnum));
-		raf.write(dc.getBytes(e_shentsize));
-		if (e_shnum >= Short.toUnsignedInt(ElfSectionHeaderConstants.SHN_LORESERVE)) {
-			throw new IOException(
-				"Unsupported section header count serialization: " + e_shnum);
-		}
-		raf.write(dc.getBytes(e_shnum));
-		raf.write(dc.getBytes(e_shstrndx));
-	}
-
-	/**
-	 * Sets the section header offset.
-	 * @param offset the new section header offset
-	 */
-	public void setSectionHeaderOffset(long offset) {
-		this.e_shoff = offset;
-	}
-
-	/**
-	 * Sets the program header offset.
-	 * @param offset the new program header offset
-	 */
-	public void setProgramHeaderOffset(long offset) {
-		this.e_phoff = offset;
 	}
 
 }

@@ -18,11 +18,13 @@
 ///
 /// Classes for keeping track of spaces and registers (for a single architecture).
 
-#ifndef __CPUI_TRANSLATE__
-#define __CPUI_TRANSLATE__
+#ifndef __TRANSLATE_HH__
+#define __TRANSLATE_HH__
 
 #include "pcoderaw.hh"
 #include "float.hh"
+
+namespace ghidra {
 
 extern AttributeId ATTRIB_CODE;		///< Marshaling attribute "code"
 extern AttributeId ATTRIB_CONTAIN;	///< Marshaling attribute "contain"
@@ -278,6 +280,9 @@ public:
 
   /// \brief Make sure a possibly offset \e join address has a proper JoinRecord
   void renormalizeJoinAddress(Address &addr,int4 size);
+
+  /// \brief Parse a string with just an \e address \e space name and a hex offset
+  Address parseAddressSimple(const string &val);
 };
 
 /// \brief The interface to a translation engine for a processor.
@@ -599,4 +604,5 @@ inline uint4 Translate::getUniqueStart(UniqueLayout layout) const {
   return (layout != ANALYSIS) ? layout + unique_base : layout;
 }
 
+} // End namespace ghidra
 #endif

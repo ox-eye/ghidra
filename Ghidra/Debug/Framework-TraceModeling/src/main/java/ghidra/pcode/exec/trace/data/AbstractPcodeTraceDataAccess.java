@@ -17,13 +17,13 @@ package ghidra.pcode.exec.trace.data;
 
 import java.nio.ByteBuffer;
 
-import com.google.common.collect.Range;
-
 import ghidra.program.model.address.*;
 import ghidra.program.model.lang.Language;
+import ghidra.trace.model.Lifespan;
+import ghidra.trace.model.TraceTimeViewport;
 import ghidra.trace.model.guest.TracePlatform;
 import ghidra.trace.model.memory.*;
-import ghidra.trace.util.TraceTimeViewport;
+import ghidra.trace.util.TraceRegisterUtils;
 
 /**
  * An abstract data-access shim, for either memory or registers
@@ -49,6 +49,11 @@ public abstract class AbstractPcodeTraceDataAccess implements InternalPcodeTrace
 		this.viewport = viewport;
 
 		this.mm = platform.getTrace().getMemoryManager();
+	}
+
+	@Override
+	public TraceTimeViewport getViewport() {
+		return viewport;
 	}
 
 	@Override
@@ -103,7 +108,12 @@ public abstract class AbstractPcodeTraceDataAccess implements InternalPcodeTrace
 		if (hostRange == null) {
 			return;
 		}
-		getMemoryOps(true).setState(snap, toOverlay(hostRange), state);
+		TraceMemoryOperations ops = getMemoryOps(true);
+		if (ops == null) {
+			throw new AssertionError("Cannot get memory operations for writing. " +
+				"This usually indicates a schema issue.");
+		}
+		ops.setState(snap, toOverlay(hostRange), state);
 	}
 
 	@Override
@@ -126,23 +136,30 @@ public abstract class AbstractPcodeTraceDataAccess implements InternalPcodeTrace
 		return hostSet.isEmpty() ? TraceMemoryState.KNOWN : TraceMemoryState.UNKNOWN;
 	}
 
-	protected AddressSetView doGetKnown(Range<Long> span) {
+	@Override
+	public AddressSetView intersectViewKnown(AddressSetView guestView, boolean useFullSpans) {
 		TraceMemoryOperations ops = getMemoryOps(false);
 		if (ops == null) {
 			return new AddressSet();
 		}
-		return platform.mapHostToGuest(ops.getAddressesWithState(span,
-			s -> s == TraceMemoryState.KNOWN));
-	}
 
-	@Override
-	public AddressSetView getKnownNow() {
-		return doGetKnown(Range.singleton(snap));
-	}
-
-	@Override
-	public AddressSetView getKnownBefore() {
-		return doGetKnown(Range.closed(0L, snap));
+		AddressSetView hostView = toOverlay(platform.mapGuestToHost(guestView));
+		AddressSet hostKnown = new AddressSet();
+		if (useFullSpans) {
+			for (Lifespan span : viewport.getOrderedSpans()) {
+				hostKnown.add(ops.getAddressesWithState(span, hostView,
+					st -> st != null && st != TraceMemoryState.UNKNOWN));
+			}
+		}
+		else {
+			for (long snap : viewport.getOrderedSnaps()) {
+				hostKnown.add(ops.getAddressesWithState(snap, hostView,
+					st -> st != null && st != TraceMemoryState.UNKNOWN));
+			}
+		}
+		AddressSetView hostResult =
+			TraceRegisterUtils.getPhysicalSet(hostView.intersect(hostKnown));
+		return platform.mapHostToGuest(hostResult);
 	}
 
 	@Override
@@ -155,7 +172,7 @@ public abstract class AbstractPcodeTraceDataAccess implements InternalPcodeTrace
 		AddressSetView hostView = toOverlay(platform.mapGuestToHost(guestView));
 		AddressSetView hostKnown = ops.getAddressesWithState(snap, hostView,
 			s -> s != null && s != TraceMemoryState.UNKNOWN);
-		AddressSetView hostResult = hostView.subtract(hostKnown);
+		AddressSetView hostResult = TraceRegisterUtils.getPhysicalSet(hostView.subtract(hostKnown));
 		return platform.mapHostToGuest(hostResult);
 	}
 
@@ -166,7 +183,12 @@ public abstract class AbstractPcodeTraceDataAccess implements InternalPcodeTrace
 		if (hostStart == null) {
 			return 0;
 		}
-		return getMemoryOps(true).putBytes(snap, toOverlay(hostStart), buf);
+		TraceMemoryOperations ops = getMemoryOps(true);
+		if (ops == null) {
+			throw new AssertionError("Cannot get memory operations for writing. " +
+				"This usually indicates a schema issue.");
+		}
+		return ops.putBytes(snap, toOverlay(hostStart), buf);
 	}
 
 	@Override
@@ -184,6 +206,15 @@ public abstract class AbstractPcodeTraceDataAccess implements InternalPcodeTrace
 			return length;
 		}
 		return ops.getViewBytes(snap, toOverlay(hostStart), buf);
+	}
+
+	@Override
+	public Address translate(Address address) {
+		Address host = platform.mapGuestToHost(address);
+		if (host == null) {
+			return null;
+		}
+		return toOverlay(host);
 	}
 
 	@Override

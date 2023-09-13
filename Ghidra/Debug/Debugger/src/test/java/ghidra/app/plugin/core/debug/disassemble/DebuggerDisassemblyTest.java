@@ -27,21 +27,18 @@ import java.util.stream.Collectors;
 
 import org.junit.*;
 
-import com.google.common.collect.Range;
-
+import db.Transaction;
 import docking.action.DockingActionIf;
 import generic.Unique;
 import ghidra.app.context.ListingActionContext;
 import ghidra.app.plugin.core.assembler.AssemblerPluginTestHelper;
 import ghidra.app.plugin.core.debug.gui.AbstractGhidraHeadedDebuggerGUITest;
-import ghidra.app.plugin.core.debug.gui.listing.DebuggerListingPlugin;
-import ghidra.app.plugin.core.debug.gui.listing.DebuggerListingProvider;
-import ghidra.app.plugin.core.debug.service.editing.DebuggerStateEditingServicePlugin;
+import ghidra.app.plugin.core.debug.gui.listing.*;
+import ghidra.app.plugin.core.debug.service.control.DebuggerControlServicePlugin;
 import ghidra.app.plugin.core.debug.service.platform.DebuggerPlatformServicePlugin;
 import ghidra.app.plugin.core.debug.service.workflow.DebuggerWorkflowServiceProxyPlugin;
 import ghidra.app.plugin.core.debug.workflow.DisassembleAtPcDebuggerBot;
 import ghidra.app.services.*;
-import ghidra.app.services.DebuggerStateEditingService.StateEditingMode;
 import ghidra.dbg.target.TargetEnvironment;
 import ghidra.dbg.target.schema.SchemaContext;
 import ghidra.dbg.target.schema.TargetObjectSchema.SchemaName;
@@ -57,18 +54,18 @@ import ghidra.trace.database.listing.DBTraceInstruction;
 import ghidra.trace.database.listing.DBTraceInstructionsMemoryView;
 import ghidra.trace.database.memory.DBTraceMemoryManager;
 import ghidra.trace.database.memory.DBTraceMemorySpace;
-import ghidra.trace.database.program.DBTraceVariableSnapProgramView;
 import ghidra.trace.database.target.DBTraceObject;
 import ghidra.trace.database.target.DBTraceObjectManager;
+import ghidra.trace.model.Lifespan;
 import ghidra.trace.model.guest.TraceGuestPlatform;
 import ghidra.trace.model.memory.TraceMemoryFlag;
 import ghidra.trace.model.memory.TraceObjectMemoryRegion;
+import ghidra.trace.model.program.TraceProgramView;
 import ghidra.trace.model.stack.TraceObjectStackFrame;
 import ghidra.trace.model.target.TraceObject.ConflictResolution;
 import ghidra.trace.model.target.TraceObjectKeyPath;
 import ghidra.trace.model.thread.TraceObjectThread;
 import ghidra.trace.model.thread.TraceThread;
-import ghidra.util.database.UndoableTransaction;
 import ghidra.util.task.TaskMonitor;
 
 public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest {
@@ -147,17 +144,24 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 		workflowService.enableBots(disBot);
 	}
 
+	protected DebuggerListingActionContext createActionContext(Address start, int len) {
+		TraceProgramView view = tb.trace.getProgramView();
+		ProgramSelection sel = new ProgramSelection(start, start.addWrap(len - 1));
+		return new DebuggerListingActionContext(listingProvider, new ProgramLocation(view, start),
+			sel, null);
+	}
+
 	protected TraceObjectThread createPolyglotTrace(String arch, long offset,
 			Supplier<ByteBuffer> byteSupplier) throws IOException {
 		createAndOpenTrace("DATA:BE:64:default");
 
 		DBTraceObjectManager objects = tb.trace.getObjectManager();
-		try (UndoableTransaction tid = tb.startTransaction()) {
+		try (Transaction tx = tb.startTransaction()) {
 			objects.createRootObject(ctx.getSchema(new SchemaName("Session")));
 			DBTraceObject env =
 				objects.createObject(TraceObjectKeyPath.parse("Targets[0].Environment"));
 			assertEquals(ctx.getSchema(new SchemaName("Environment")), env.getTargetSchema());
-			Range<Long> zeroOn = Range.atLeast(0L);
+			Lifespan zeroOn = Lifespan.nowOn(0);
 			env.insert(zeroOn, ConflictResolution.DENY);
 			env.setAttribute(zeroOn, TargetEnvironment.DEBUGGER_ATTRIBUTE_NAME, "test");
 			env.setAttribute(zeroOn, TargetEnvironment.ARCH_ATTRIBUTE_NAME, arch);
@@ -192,7 +196,7 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 			Supplier<ByteBuffer> byteSupplier) throws Throwable {
 		createAndOpenTrace(langID);
 
-		try (UndoableTransaction tid = tb.startTransaction()) {
+		try (Transaction tx = tb.startTransaction()) {
 			DBTraceMemoryManager memory = tb.trace.getMemoryManager();
 			memory.createRegion("Memory[bin:.text]", 0, tb.range(offset, offset + 0xffff),
 				Set.of(TraceMemoryFlag.EXECUTE));
@@ -223,7 +227,7 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 
 		// Fabricate the cpsr so that ARM is used. Otherwise, it will assume Cortex-M, so THUMB
 		TraceThread thread;
-		try (UndoableTransaction tid = tb.startTransaction()) {
+		try (Transaction tx = tb.startTransaction()) {
 			thread = tb.getOrAddThread("Threads[0]", 0);
 			DBTraceMemorySpace regs =
 				tb.trace.getMemoryManager().getMemoryRegisterSpace(thread, true);
@@ -238,10 +242,7 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 		// Ensure the mapper is added to the trace
 		assertNotNull(platformService.getMapper(tb.trace, null, 0));
 
-		DBTraceVariableSnapProgramView view = tb.trace.getProgramView();
-		ListingActionContext actionContext = new ListingActionContext(listingProvider,
-			listingProvider, view, new ProgramLocation(view, start),
-			new ProgramSelection(start, start.addWrap(3)), null);
+		ListingActionContext actionContext = createActionContext(start, 4);
 		performAction(disassemblerPlugin.actionDisassemble, actionContext, true);
 		waitForTasks();
 
@@ -257,7 +258,7 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 
 		// Fabricate the cpsr so that THUMB is used, even though we could omit as in Cortex-M
 		TraceThread thread;
-		try (UndoableTransaction tid = tb.startTransaction()) {
+		try (Transaction tx = tb.startTransaction()) {
 			thread = tb.getOrAddThread("Threads[0]", 0);
 			DBTraceMemorySpace regs =
 				tb.trace.getMemoryManager().getMemoryRegisterSpace(thread, true);
@@ -273,10 +274,7 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 		// Ensure the mapper is added to the trace
 		assertNotNull(platformService.getMapper(tb.trace, null, 0));
 
-		DBTraceVariableSnapProgramView view = tb.trace.getProgramView();
-		ListingActionContext actionContext = new ListingActionContext(listingProvider,
-			listingProvider, view, new ProgramLocation(view, start),
-			new ProgramSelection(start, start.addWrap(3)), null);
+		ListingActionContext actionContext = createActionContext(start, 4);
 		performAction(disassemblerPlugin.actionDisassemble, actionContext, true);
 		waitForTasks();
 
@@ -299,10 +297,7 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 		// Ensure the mapper is added to the trace
 		assertNotNull(platformService.getMapper(tb.trace, thread.getObject(), 0));
 
-		DBTraceVariableSnapProgramView view = tb.trace.getProgramView();
-		ListingActionContext actionContext = new ListingActionContext(listingProvider,
-			listingProvider, view, new ProgramLocation(view, start),
-			new ProgramSelection(start, start.addWrap(3)), null);
+		ListingActionContext actionContext = createActionContext(start, 4);
 		performAction(disassemblerPlugin.actionDisassemble, actionContext, true);
 		waitForTasks();
 
@@ -326,10 +321,7 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 		// Ensure the mapper is added to the trace
 		assertNotNull(platformService.getMapper(tb.trace, thread.getObject(), 0));
 
-		DBTraceVariableSnapProgramView view = tb.trace.getProgramView();
-		ListingActionContext actionContext = new ListingActionContext(listingProvider,
-			listingProvider, view, new ProgramLocation(view, start),
-			new ProgramSelection(start, start.addWrap(3)), null);
+		ListingActionContext actionContext = createActionContext(start, 4);
 		performAction(disassemblerPlugin.actionDisassemble, actionContext, true);
 		waitForTasks();
 
@@ -341,10 +333,7 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 
 	protected void performFixedDisassembleAction(Address start,
 			Predicate<DockingActionIf> actionPred) {
-		DBTraceVariableSnapProgramView view = tb.trace.getProgramView();
-		ListingActionContext actionContext = new ListingActionContext(listingProvider,
-			listingProvider, view, new ProgramLocation(view, start),
-			new ProgramSelection(start, start.addWrap(3)), null);
+		ListingActionContext actionContext = createActionContext(start, 4);
 		DockingActionIf action =
 			runSwing(() -> Unique.assertOne(disassemblerPlugin.getPopupActions(tool, actionContext)
 					.stream()
@@ -407,26 +396,21 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 	@Test
 	public void testCurrentAssembleActionHostArm() throws Throwable {
 		// Assemble actions will think read-only otherwise
-		DebuggerStateEditingService editingService =
-			addPlugin(tool, DebuggerStateEditingServicePlugin.class);
+		DebuggerControlService controlService = addPlugin(tool, DebuggerControlServicePlugin.class);
 
 		createLegacyTrace("ARM:LE:32:v8", 0x00400000, () -> tb.buf(0x00, 0x00, 0x00, 0x00));
 		Address start = tb.addr(0x00400000);
-		editingService.setCurrentMode(tb.trace, StateEditingMode.WRITE_TRACE);
+		controlService.setCurrentMode(tb.trace, ControlMode.RW_TRACE);
 
 		// Ensure the mapper is added to the trace
 		assertNotNull(platformService.getMapper(tb.trace, null, 0));
 
-		try (UndoableTransaction tid = tb.startTransaction()) {
+		try (Transaction tx = tb.startTransaction()) {
 			tb.addInstruction(0, start, tb.host);
 		}
 		waitForDomainObject(tb.trace);
 
-		DBTraceVariableSnapProgramView view = tb.trace.getProgramView();
-		ListingActionContext actionContext = new ListingActionContext(listingProvider,
-			listingProvider, view, new ProgramLocation(view, start),
-			new ProgramSelection(start, start.addWrap(1)), null);
-
+		ListingActionContext actionContext = createActionContext(start, 2);
 		assertTrue(disassemblerPlugin.actionPatchInstruction.isEnabledForContext(actionContext));
 		DebuggerDisassemblerPluginTestHelper helper = new DebuggerDisassemblerPluginTestHelper(
 			disassemblerPlugin, listingProvider, tb.trace.getProgramView());
@@ -439,18 +423,17 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 	@Test
 	public void testCurrentAssembleActionHostThumb() throws Throwable {
 		// Assemble actions will think read-only otherwise
-		DebuggerStateEditingService editingService =
-			addPlugin(tool, DebuggerStateEditingServicePlugin.class);
+		DebuggerControlService controlService = addPlugin(tool, DebuggerControlServicePlugin.class);
 
 		// Don't cheat here and choose v8T!
 		createLegacyTrace("ARM:LE:32:v8", 0x00400000, () -> tb.buf(0x00, 0x00));
 		Address start = tb.addr(0x00400000);
-		editingService.setCurrentMode(tb.trace, StateEditingMode.WRITE_TRACE);
+		controlService.setCurrentMode(tb.trace, ControlMode.RW_TRACE);
 
 		// Ensure the mapper is added to the trace
 		assertNotNull(platformService.getMapper(tb.trace, null, 0));
 
-		try (UndoableTransaction tid = tb.startTransaction()) {
+		try (Transaction tx = tb.startTransaction()) {
 			TraceDisassembleCommand dis = new TraceDisassembleCommand(tb.host, start,
 				new AddressSet(start, start.addWrap(1)));
 			dis.setInitialContext(DebuggerDisassemblerPlugin.deriveAlternativeDefaultContext(
@@ -459,11 +442,7 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 		}
 		waitForDomainObject(tb.trace);
 
-		DBTraceVariableSnapProgramView view = tb.trace.getProgramView();
-		ListingActionContext actionContext = new ListingActionContext(listingProvider,
-			listingProvider, view, new ProgramLocation(view, start),
-			new ProgramSelection(start, start.addWrap(1)), null);
-
+		ListingActionContext actionContext = createActionContext(start, 2);
 		assertTrue(disassemblerPlugin.actionPatchInstruction.isEnabledForContext(actionContext));
 		DebuggerDisassemblerPluginTestHelper helper = new DebuggerDisassemblerPluginTestHelper(
 			disassemblerPlugin, listingProvider, tb.trace.getProgramView());
@@ -476,29 +455,24 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 	@Test
 	public void testCurrentAssembleActionGuestArm() throws Throwable {
 		// Assemble actions will think read-only otherwise
-		DebuggerStateEditingService editingService =
-			addPlugin(tool, DebuggerStateEditingServicePlugin.class);
+		DebuggerControlService controlService = addPlugin(tool, DebuggerControlServicePlugin.class);
 
 		TraceObjectThread thread =
 			createPolyglotTrace("armv8le", 0x00400000, () -> tb.buf(0x00, 0x00, 0x00, 0x00));
 		Address start = tb.addr(0x00400000);
-		editingService.setCurrentMode(tb.trace, StateEditingMode.WRITE_TRACE);
+		controlService.setCurrentMode(tb.trace, ControlMode.RW_TRACE);
 
 		// Ensure the mapper is added to the trace
 		assertNotNull(platformService.getMapper(tb.trace, thread.getObject(), 0));
 
 		TraceGuestPlatform guest =
 			Unique.assertOne(tb.trace.getPlatformManager().getGuestPlatforms());
-		try (UndoableTransaction tid = tb.startTransaction()) {
+		try (Transaction tx = tb.startTransaction()) {
 			tb.addInstruction(0, start, guest);
 		}
 		waitForDomainObject(tb.trace);
 
-		DBTraceVariableSnapProgramView view = tb.trace.getProgramView();
-		ListingActionContext actionContext = new ListingActionContext(listingProvider,
-			listingProvider, view, new ProgramLocation(view, start),
-			new ProgramSelection(start, start.addWrap(1)), null);
-
+		ListingActionContext actionContext = createActionContext(start, 2);
 		assertTrue(disassemblerPlugin.actionPatchInstruction.isEnabledForContext(actionContext));
 		DebuggerDisassemblerPluginTestHelper helper = new DebuggerDisassemblerPluginTestHelper(
 			disassemblerPlugin, listingProvider, tb.trace.getProgramView());
@@ -511,13 +485,12 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 	@Test
 	public void testCurrentAssembleActionGuestThumb() throws Throwable {
 		// Assemble actions will think read-only otherwise
-		DebuggerStateEditingService editingService =
-			addPlugin(tool, DebuggerStateEditingServicePlugin.class);
+		DebuggerControlService controlService = addPlugin(tool, DebuggerControlServicePlugin.class);
 
 		TraceObjectThread thread =
 			createPolyglotTrace("armv8le", 0x00400000, () -> tb.buf(0x00, 0x00));
 		Address start = tb.addr(0x00400000);
-		editingService.setCurrentMode(tb.trace, StateEditingMode.WRITE_TRACE);
+		controlService.setCurrentMode(tb.trace, ControlMode.RW_TRACE);
 
 		// Ensure the mapper is added to the trace
 		assertNotNull(platformService.getMapper(tb.trace, thread.getObject(), 0));
@@ -525,7 +498,7 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 		waitForPass(() -> Unique.assertOne(tb.trace.getPlatformManager().getGuestPlatforms()));
 		TraceGuestPlatform guest =
 			Unique.assertOne(tb.trace.getPlatformManager().getGuestPlatforms());
-		try (UndoableTransaction tid = tb.startTransaction()) {
+		try (Transaction tx = tb.startTransaction()) {
 			TraceDisassembleCommand dis = new TraceDisassembleCommand(guest, start,
 				new AddressSet(start, start.addWrap(1)));
 			dis.setInitialContext(DebuggerDisassemblerPlugin.deriveAlternativeDefaultContext(
@@ -534,11 +507,7 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 		}
 		waitForDomainObject(tb.trace);
 
-		DBTraceVariableSnapProgramView view = tb.trace.getProgramView();
-		ListingActionContext actionContext = new ListingActionContext(listingProvider,
-			listingProvider, view, new ProgramLocation(view, start),
-			new ProgramSelection(start, start.addWrap(1)), null);
-
+		ListingActionContext actionContext = createActionContext(start, 2);
 		assertTrue(disassemblerPlugin.actionPatchInstruction.isEnabledForContext(actionContext));
 		DebuggerDisassemblerPluginTestHelper helper = new DebuggerDisassemblerPluginTestHelper(
 			disassemblerPlugin, listingProvider, tb.trace.getProgramView());
@@ -550,10 +519,7 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 
 	protected Instruction performFixedAssembleAction(Address start,
 			Predicate<FixedPlatformTracePatchInstructionAction> actionPred, String assembly) {
-		DBTraceVariableSnapProgramView view = tb.trace.getProgramView();
-		ListingActionContext actionContext = new ListingActionContext(listingProvider,
-			listingProvider, view, new ProgramLocation(view, start),
-			new ProgramSelection(start, start.addWrap(1)), null);
+		ListingActionContext actionContext = createActionContext(start, 2);
 		FixedPlatformTracePatchInstructionAction action =
 			runSwing(() -> Unique.assertOne(disassemblerPlugin.getPopupActions(tool, actionContext)
 					.stream()
@@ -569,12 +535,11 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 	@Test
 	public void testFixedAssembleActionsHostArm() throws Throwable {
 		// Assemble actions will think read-only otherwise
-		DebuggerStateEditingService editingService =
-			addPlugin(tool, DebuggerStateEditingServicePlugin.class);
+		DebuggerControlService controlService = addPlugin(tool, DebuggerControlServicePlugin.class);
 
 		createLegacyTrace("ARM:LE:32:v8", 0x00400000, () -> tb.buf());
 		Address start = tb.addr(0x00400000);
-		editingService.setCurrentMode(tb.trace, StateEditingMode.WRITE_TRACE);
+		controlService.setCurrentMode(tb.trace, ControlMode.RW_TRACE);
 
 		// Ensure the mapper is added to the trace
 		assertNotNull(platformService.getMapper(tb.trace, null, 0));
@@ -589,12 +554,11 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 	@Test
 	public void testFixedAssembleActionsGuestArm() throws Throwable {
 		// Assemble actions will think read-only otherwise
-		DebuggerStateEditingService editingService =
-			addPlugin(tool, DebuggerStateEditingServicePlugin.class);
+		DebuggerControlService controlService = addPlugin(tool, DebuggerControlServicePlugin.class);
 
 		TraceObjectThread thread = createPolyglotTrace("armv8le", 0x00400000, () -> tb.buf());
 		Address start = tb.addr(0x00400000);
-		editingService.setCurrentMode(tb.trace, StateEditingMode.WRITE_TRACE);
+		controlService.setCurrentMode(tb.trace, ControlMode.RW_TRACE);
 
 		// Ensure the mapper is added to the trace
 		assertNotNull(platformService.getMapper(tb.trace, thread.getObject(), 0));
@@ -609,12 +573,11 @@ public class DebuggerDisassemblyTest extends AbstractGhidraHeadedDebuggerGUITest
 	@Test
 	public void testFixedAssembleActionsGuestThumb() throws Throwable {
 		// Assemble actions will think read-only otherwise
-		DebuggerStateEditingService editingService =
-			addPlugin(tool, DebuggerStateEditingServicePlugin.class);
+		DebuggerControlService controlService = addPlugin(tool, DebuggerControlServicePlugin.class);
 
 		TraceObjectThread thread = createPolyglotTrace("armv8le", 0x00400000, () -> tb.buf());
 		Address start = tb.addr(0x00400000);
-		editingService.setCurrentMode(tb.trace, StateEditingMode.WRITE_TRACE);
+		controlService.setCurrentMode(tb.trace, ControlMode.RW_TRACE);
 
 		// Ensure the mapper is added to the trace
 		assertNotNull(platformService.getMapper(tb.trace, thread.getObject(), 0));

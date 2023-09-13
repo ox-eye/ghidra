@@ -23,12 +23,12 @@ import ghidra.app.util.bin.ByteProvider;
 import ghidra.app.util.bin.format.elf.ElfException;
 import ghidra.app.util.bin.format.elf.ElfHeader;
 import ghidra.app.util.importer.MessageLog;
-import ghidra.framework.model.DomainFolder;
 import ghidra.framework.model.DomainObject;
+import ghidra.framework.model.Project;
 import ghidra.framework.options.Options;
 import ghidra.program.model.lang.Endian;
 import ghidra.program.model.listing.Program;
-import ghidra.program.util.ELFExternalSymbolResolver;
+import ghidra.program.util.ExternalSymbolResolver;
 import ghidra.util.Msg;
 import ghidra.util.NumericUtilities;
 import ghidra.util.exception.CancelledException;
@@ -47,7 +47,6 @@ public class ElfLoader extends AbstractLibrarySupportLoader {
 	public final static String ELF_ORIGINAL_IMAGE_BASE_PROPERTY = "ELF Original Image Base";
 	public final static String ELF_PRELINKED_PROPERTY = "ELF Prelinked";
 
-	public final static String ELF_REQUIRED_LIBRARY_PROPERTY_PREFIX = "ELF Required Library ["; // followed by "#]"
 	public final static String ELF_SOURCE_FILE_PROPERTY_PREFIX = "ELF Source File ["; // followed by "#]"
 
 	/**
@@ -153,15 +152,13 @@ public class ElfLoader extends AbstractLibrarySupportLoader {
 	}
 
 	@Override
-	protected void postLoadProgramFixups(List<Program> importedPrograms, DomainFolder importFolder,
+	protected void postLoadProgramFixups(List<Loaded<Program>> loadedPrograms, Project project,
 			List<Option> options, MessageLog messageLog, TaskMonitor monitor)
 			throws CancelledException, IOException {
-		super.postLoadProgramFixups(importedPrograms, importFolder, options, messageLog, monitor);
+		super.postLoadProgramFixups(loadedPrograms, project, options, messageLog, monitor);
 
-		for (Program importedProgram : importedPrograms) {
-			ELFExternalSymbolResolver.fixUnresolvedExternalSymbols(importedProgram, true,
-				messageLog, monitor);
-		}
+		ExternalSymbolResolver.fixUnresolvedExternalSymbols(loadedPrograms, true, messageLog,
+			monitor);
 	}
 
 	@Override

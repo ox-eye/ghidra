@@ -20,8 +20,6 @@ import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.stream.Stream;
 
-import com.google.common.collect.Range;
-
 import ghidra.dbg.target.TargetRegister;
 import ghidra.dbg.target.TargetRegisterContainer;
 import ghidra.dbg.target.schema.TargetObjectSchema;
@@ -33,9 +31,8 @@ import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSpace;
 import ghidra.program.model.lang.Register;
 import ghidra.program.model.lang.RegisterValue;
-import ghidra.trace.model.Trace;
+import ghidra.trace.model.*;
 import ghidra.trace.model.Trace.*;
-import ghidra.trace.model.TraceDomainObjectListener;
 import ghidra.trace.model.guest.*;
 import ghidra.trace.model.memory.TraceMemoryManager;
 import ghidra.trace.model.memory.TraceMemorySpace;
@@ -66,7 +63,7 @@ public enum DBTraceObjectRegisterSupport {
 	static class LazyValues {
 		private final TraceObjectValue registerValue;
 		private BigInteger value;
-		private int length = -1;
+		private int bitLength = -1;
 		private byte[] be;
 		private byte[] le;
 
@@ -85,7 +82,11 @@ public enum DBTraceObjectRegisterSupport {
 						"Invalid register value " + s + ". Must be hex digits only.");
 				}
 			}
-			if (val instanceof Byte b) {
+			else if (val instanceof byte[] arr) {
+				// NOTE: Reg object values are always big endian
+				return new BigInteger(1, arr);
+			}
+			else if (val instanceof Byte b) {
 				return BigInteger.valueOf(b);
 			}
 			else if (val instanceof Short s) {
@@ -106,16 +107,16 @@ public enum DBTraceObjectRegisterSupport {
 					"'");
 		}
 
-		int getRegisterValueLength() throws RegisterValueException {
-			Object objLength = registerValue.getParent()
-					.getValue(registerValue.getMinSnap(), TargetRegister.LENGTH_ATTRIBUTE_NAME)
+		int getRegisterValueBitLength() throws RegisterValueException {
+			Object objBitLength = registerValue.getParent()
+					.getValue(registerValue.getMinSnap(), TargetRegister.BIT_LENGTH_ATTRIBUTE_NAME)
 					.getValue();
-			if (!(objLength instanceof Number)) {
+			if (!(objBitLength instanceof Number)) {
 				throw new RegisterValueException(
-					"Register length is not numeric: (" + objLength.getClass() + ") '" + objLength +
-						"'");
+					"Register length is not numeric: (" + objBitLength.getClass() + ") '" +
+						objBitLength + "'");
 			}
-			return ((Number) objLength).intValue();
+			return ((Number) objBitLength).intValue();
 		}
 
 		BigInteger getValue() throws RegisterValueException {
@@ -125,25 +126,29 @@ public enum DBTraceObjectRegisterSupport {
 			return value = convertRegisterValueToBigInteger();
 		}
 
-		int getLength() throws RegisterValueException {
-			if (length != -1) {
-				return length;
+		int getBitLength() throws RegisterValueException {
+			if (bitLength != -1) {
+				return bitLength;
 			}
-			return length = getRegisterValueLength();
+			return bitLength = getRegisterValueBitLength();
+		}
+
+		int getByteLength() throws RegisterValueException {
+			return (getBitLength() + 7) / 8;
 		}
 
 		byte[] getBytesBigEndian() throws RegisterValueException {
 			if (be != null) {
 				return be;
 			}
-			return be = Utils.bigIntegerToBytes(getValue(), getLength(), true);
+			return be = Utils.bigIntegerToBytes(getValue(), getByteLength(), true);
 		}
 
 		byte[] getBytesLittleEndian() throws RegisterValueException {
 			if (le != null) {
 				return le;
 			}
-			return le = Utils.bigIntegerToBytes(getValue(), getLength(), false);
+			return le = Utils.bigIntegerToBytes(getValue(), getByteLength(), false);
 		}
 
 		public byte[] getBytes(boolean isBigEndian) throws RegisterValueException {
@@ -160,14 +165,10 @@ public enum DBTraceObjectRegisterSupport {
 			return null;
 		}
 		String pathStr = container.getCanonicalPath().toString();
-		AddressSpace space = object.getTrace().getBaseAddressFactory().getAddressSpace(pathStr);
-		if (space == null) {
-			return null;
-		}
-		if (!space.isRegisterSpace()) {
-			return null;
-		}
-		return space;
+		Trace trace = object.getTrace();
+		return trace.getMemoryManager()
+				.getOrCreateOverlayAddressSpace(pathStr,
+					trace.getBaseAddressFactory().getRegisterSpace());
 	}
 
 	protected AddressSpace findRegisterOverlay(TraceObjectValue objectValue) {
@@ -232,7 +233,7 @@ public enum DBTraceObjectRegisterSupport {
 		if (register == null || !register.getAddressSpace().isRegisterSpace()) {
 			return;
 		}
-		for (TraceObjectValue registerValue : it(registerObject.getOrderedValues(Range.all(),
+		for (TraceObjectValue registerValue : it(registerObject.getOrderedValues(Lifespan.ALL,
 			TargetRegister.VALUE_ATTRIBUTE_NAME, true))) {
 			transferValueToPlatformRegister(registerValue, platform, mem, register);
 		}
@@ -241,7 +242,8 @@ public enum DBTraceObjectRegisterSupport {
 	protected void onSpaceAddedCheckTransferToPlatformRegisters(TracePlatform platform,
 			TraceObject regContainer, TraceMemorySpace mem) {
 		for (TraceObjectValPath path : it(
-			regContainer.querySuccessorsTargetInterface(Range.all(), TargetRegister.class))) {
+			regContainer.querySuccessorsTargetInterface(Lifespan.ALL, TargetRegister.class,
+				true))) {
 			TraceObject registerObject =
 				path.getDestination(platform.getTrace().getObjectManager().getRootObject());
 			onSpaceAddedCheckTransferObjectToPlatformRegister(registerObject, platform, mem);
@@ -427,7 +429,7 @@ public enum DBTraceObjectRegisterSupport {
 		TraceMemorySpace mem = registerObject.getTrace()
 				.getMemoryManager()
 				.getMemorySpace(hostAddr.getAddressSpace(), true);
-		for (TraceObjectValue registerValue : it(registerObject.getOrderedValues(Range.all(),
+		for (TraceObjectValue registerValue : it(registerObject.getOrderedValues(Lifespan.ALL,
 			TargetRegister.VALUE_ATTRIBUTE_NAME, true))) {
 			transferValueToPlatformRegister(registerValue, guest, mem, register);
 		}
@@ -436,7 +438,7 @@ public enum DBTraceObjectRegisterSupport {
 	public void onMappingAddedCheckTransferMemoryMapped(TraceObject root,
 			TraceGuestPlatformMappedRange mapped) {
 		for (TraceObjectValPath path : it(
-			root.querySuccessorsTargetInterface(Range.all(), TargetRegister.class))) {
+			root.querySuccessorsTargetInterface(Lifespan.ALL, TargetRegister.class, true))) {
 			TraceObject registerObject = path.getDestination(root);
 			onMappingAddedCheckTransferRegisterObjectMemoryMapped(registerObject, mapped);
 		}

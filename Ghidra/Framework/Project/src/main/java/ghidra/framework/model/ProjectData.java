@@ -39,6 +39,7 @@ public interface ProjectData {
 
 	/**
 	 * Returns the root folder of the project.
+	 * @return root {@link DomainFolder} within project.
 	 */
 	public DomainFolder getRootFolder();
 
@@ -111,15 +112,6 @@ public interface ProjectData {
 	public DomainFile getFileByID(String fileID);
 
 	/**
-	 * Get a URL for a shared domain file which is available 
-	 * within a remote repository.
-	 * @param path the absolute path of domain file relative to the root folder.
-	 * @return URL object for accessing shared file from outside of a project, or
-	 * null if file does not exist or is not shared.
-	 */
-	public URL getSharedFileURL(String path);
-
-	/**
 	 * Transform the specified name into an acceptable folder or file item name.  Only an individual folder
 	 * or file name should be specified, since any separators will be stripped-out.
 	 * NOTE: Uniqueness of name within the intended target folder is not considered.
@@ -130,6 +122,7 @@ public interface ProjectData {
 
 	/**
 	 * Returns the projectLocator for the this ProjectData.
+	 * @return project locator object
 	 */
 	public ProjectLocator getProjectLocator();
 
@@ -150,12 +143,14 @@ public interface ProjectData {
 	 * Sync the Domain folder/file structure with the underlying file structure.
 	 * @param force if true all folders will be be visited and refreshed, if false
 	 * only those folders previously visited will be refreshed.
+	 * @throws IOException if an IO error occurs
 	 */
 	public void refresh(boolean force) throws IOException;
 
 	/**
 	 * Returns User object associated with remote repository or null if a remote repository
 	 * is not used.
+	 * @return current remote user identity or null
 	 */
 	public User getUser();
 
@@ -196,8 +191,10 @@ public interface ProjectData {
 			TaskMonitor monitor) throws IOException, CancelledException;
 
 	/**
-	 * Close the project storage associated with this project data object.
-	 * NOTE: This should not be invoked if this object is utilized by a Project instance.
+	 * Initiate disposal of this project data object.  Any files already open will delay 
+	 * disposal until they are closed.
+	 * NOTE: This should only be invoked by the controlling object which created/opened this
+	 * instance to avoid premature disposal. 
 	 */
 	public void close();
 
@@ -213,5 +210,19 @@ public interface ProjectData {
 	 * @throws InvalidNameException if name is invalid
 	 */
 	public void testValidName(String name, boolean isPath) throws InvalidNameException;
+
+	/**
+	 * Generate a repository URL which corresponds to this project data if applicable.
+	 * Local private projects will return null;
+	 * @return repository URL which corresponds to this project data or null if not applicable.
+	 */
+	public URL getSharedProjectURL();
+
+	/**
+	 * Generate a local URL which corresponds to this project data if applicable.
+	 * Remote transient project data will return null;
+	 * @return local URL which corresponds to this project data or null if not applicable.
+	 */
+	public URL getLocalProjectURL();
 
 }

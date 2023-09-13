@@ -36,7 +36,7 @@ import ghidra.program.model.symbol.*;
 import ghidra.util.exception.InvalidInputException;
 import ghidra.util.task.TaskMonitor;
 
-public class DexLoader extends AbstractLibrarySupportLoader {
+public class DexLoader extends AbstractProgramWrapperLoader {
 
 	public DexLoader() {
 	}
@@ -95,7 +95,7 @@ public class DexLoader extends AbstractLibrarySupportLoader {
 			createMethodByteCodeBlock(program, length, monitor);
 
 			for (ClassDefItem item : header.getClassDefs()) {
-				monitor.checkCanceled();
+				monitor.checkCancelled();
 
 				ClassDataItem classDataItem = item.getClassDataItem();
 				if (classDataItem == null) {
@@ -140,7 +140,7 @@ public class DexLoader extends AbstractLibrarySupportLoader {
 	protected void createMethods(Program program, DexHeader header, ClassDefItem item,
 			List<EncodedMethod> methods, TaskMonitor monitor, MessageLog log) throws Exception {
 		for (int i = 0; i < methods.size(); ++i) {
-			monitor.checkCanceled();
+			monitor.checkCancelled();
 
 			EncodedMethod encodedMethod = methods.get(i);
 
@@ -174,7 +174,7 @@ public class DexLoader extends AbstractLibrarySupportLoader {
 
 		int methodIndex = 0;
 		for (MethodIDItem item : header.getMethods()) {
-			monitor.checkCanceled();
+			monitor.checkCancelled();
 			monitor.incrementProgress(1);
 
 			StringBuilder builder = new StringBuilder();
@@ -257,15 +257,5 @@ public class DexLoader extends AbstractLibrarySupportLoader {
 	public String validateOptions(ByteProvider provider, LoadSpec loadSpec, List<Option> options,
 			Program program) {
 		return null;
-	}
-	
-	@Override
-	protected boolean isLoadLocalLibraries(List<Option> options) {
-		return false;
-	}
-
-	@Override
-	protected boolean isLoadSystemLibraries(List<Option> options) {
-		return false;
 	}
 }

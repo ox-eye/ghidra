@@ -85,12 +85,6 @@ public class TestDummyProjectData implements ProjectData {
 	}
 
 	@Override
-	public URL getSharedFileURL(String path) {
-		// stub
-		return null;
-	}
-
-	@Override
 	public String makeValidName(String name) {
 		// stub
 		return null;
@@ -98,6 +92,18 @@ public class TestDummyProjectData implements ProjectData {
 
 	@Override
 	public ProjectLocator getProjectLocator() {
+		// stub
+		return null;
+	}
+
+	@Override
+	public URL getSharedProjectURL() {
+		// stub
+		return null;
+	}
+
+	@Override
+	public URL getLocalProjectURL() {
 		// stub
 		return null;
 	}

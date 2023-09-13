@@ -16,13 +16,12 @@
 package ghidra.plugins.fsbrowser;
 
 import static ghidra.formats.gfilesystem.fileinfo.FileAttributeType.*;
-import static java.util.Map.entry;
-
-import java.util.*;
-import java.util.function.Function;
+import static java.util.Map.*;
 
 import java.awt.Component;
 import java.io.*;
+import java.util.*;
+import java.util.function.Function;
 
 import javax.swing.*;
 
@@ -31,6 +30,7 @@ import org.apache.commons.io.FilenameUtils;
 import docking.action.DockingAction;
 import docking.action.builder.ActionBuilder;
 import docking.widgets.OptionDialog;
+import docking.widgets.SelectFromListDialog;
 import docking.widgets.dialogs.MultiLineMessageDialog;
 import docking.widgets.filechooser.GhidraFileChooser;
 import docking.widgets.filechooser.GhidraFileChooserMode;
@@ -82,6 +82,7 @@ class FSBActionManager {
 	DockingAction actionExpand;
 	DockingAction actionCollapse;
 	DockingAction actionImportBatch;
+	DockingAction actionAddToProgram;
 	DockingAction actionCloseFileSystem;
 	DockingAction actionClearCachedPasswords;
 	/* end package visibility */
@@ -116,6 +117,7 @@ class FSBActionManager {
 		actions.add((actionOpenPrograms = createOpenProgramsAction()));
 		actions.add((actionImport = createImportAction()));
 		actions.add((actionImportBatch = createBatchImportAction()));
+		actions.add((actionAddToProgram = createAddToProgramAction()));
 		actions.add((actionOpenFileSystemNewWindow = createOpenFileSystemNewWindowAction()));
 		actions.add((actionOpenFileSystemNested = createOpenFileSystemNestedAction()));
 		actions.add((actionOpenFileSystemChooser = createOpenNewFileSystemAction()));
@@ -144,6 +146,15 @@ class FSBActionManager {
 	}
 
 	public void dispose() {
+
+		if (chooserExport != null) {
+			chooserExport.dispose();
+		}
+
+		if (chooserExportAll != null) {
+			chooserExportAll.dispose();
+		}
+
 		removeActions();
 	}
 
@@ -333,7 +344,7 @@ class FSBActionManager {
 				.enabledWhen(ac -> ac.notBusy() && ac.getFileFSRL() != null)
 				.popupMenuIcon(ImageManager.EXTRACT)
 				.popupMenuPath("Export...")
-				.popupMenuGroup("F", "B")
+				.popupMenuGroup("F", "C")
 				.onAction(
 					ac -> {
 						FSRL fsrl = ac.getFileFSRL();
@@ -694,6 +705,39 @@ class FSBActionManager {
 
 					BatchImportDialog.showAndImport(plugin.getTool(), null, files, null,
 						FSBUtils.getProgramManager(plugin.getTool(), false));
+				})
+				.build();
+	}
+
+	private DockingAction createAddToProgramAction() {
+		return new ActionBuilder("FSB Add To Program", plugin.getName())
+				.withContext(FSBActionContext.class)
+				.enabledWhen(ac -> ac.notBusy() && ac.getLoadableFSRL() != null)
+				.popupMenuIcon(ImageManager.IMPORT)
+				.popupMenuPath("Add To Program")
+				.popupMenuGroup("F", "C")
+				.onAction(ac -> {
+					FSRL fsrl = ac.getLoadableFSRL();
+					if (fsrl == null) {
+						return;
+					}
+						
+					gTree.runTask(monitor -> {
+						if (!ensureFileAccessable(fsrl, ac.getSelectedNode(), monitor)) {
+							return;
+						}
+
+						PluginTool tool = plugin.getTool();
+						ProgramManager pm = FSBUtils.getProgramManager(tool, false);
+						Program program = null;
+						if (pm == null || (program = pm.getCurrentProgram()) == null) {
+							Msg.showError(this, gTree, "Unable To Add To Program",
+								"No programs are open");
+							return;
+						}
+						ImporterUtilities.showAddToProgramDialog(fsrl, program, tool, monitor);
+					});
+
 				})
 				.build();
 	}

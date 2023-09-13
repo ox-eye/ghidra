@@ -32,6 +32,7 @@ import org.xml.sax.SAXException;
 import docking.widgets.OptionDialog;
 import docking.widgets.filechooser.GhidraFileChooser;
 import docking.widgets.table.*;
+import generic.theme.GThemeDefaults.Colors.Palette;
 import ghidra.framework.preferences.Preferences;
 import ghidra.framework.store.LockException;
 import ghidra.program.database.ProgramDB;
@@ -54,7 +55,7 @@ public class SpecExtensionPanel extends JPanel {
 	private boolean unappliedChanges;
 	private SpecExtension specExtension;
 	private List<CompilerElement> tableElements;
-	private ExtensionTableModel tableModel;
+	private SpecExtensionTableModel tableModel;
 	private GTable extensionTable;
 	private JButton exportButton;
 	private JButton removeButton;
@@ -162,7 +163,7 @@ public class SpecExtensionPanel extends JPanel {
 		}
 	}
 
-	private class ExtensionTableModel extends AbstractGTableModel<CompilerElement> {
+	private class SpecExtensionTableModel extends AbstractGTableModel<CompilerElement> {
 		private final String[] columnNames = { "Extension Type", "Name", "Status" };
 
 		@Override
@@ -232,7 +233,7 @@ public class SpecExtensionPanel extends JPanel {
 			CompilerElement compilerElement = tableModel.getRowObject(row);
 
 			if (compilerElement.status == Status.EXTENSION_ERROR) {
-				setBackground(Color.pink);
+				setBackground(Palette.PINK);
 			}
 
 			return this;
@@ -382,7 +383,7 @@ public class SpecExtensionPanel extends JPanel {
 
 	private void createPanel() {
 		setLayout(new BorderLayout(10, 10));
-		tableModel = new ExtensionTableModel();
+		tableModel = new SpecExtensionTableModel();
 		extensionTable = new CompilerElementTable(tableModel);
 
 		JScrollPane sp = new JScrollPane(extensionTable);
@@ -433,7 +434,7 @@ public class SpecExtensionPanel extends JPanel {
 		// return them to that spot if they use the dialog again.
 		Preferences.setProperty(LAST_EXPORT_DIRECTORY,
 			fileChooser.getCurrentDirectory().getAbsolutePath());
-
+		fileChooser.dispose();
 		return selectedFile;
 	}
 

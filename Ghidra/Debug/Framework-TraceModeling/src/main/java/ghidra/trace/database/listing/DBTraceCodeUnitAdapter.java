@@ -15,14 +15,13 @@
  */
 package ghidra.trace.database.listing;
 
-import static ghidra.lifecycle.Unfinished.TODO;
+import static ghidra.lifecycle.Unfinished.*;
 
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.Map.Entry;
 
-import com.google.common.collect.Iterators;
-import com.google.common.collect.Range;
+import org.apache.commons.collections4.IteratorUtils;
 
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressRangeImpl;
@@ -32,6 +31,7 @@ import ghidra.program.model.mem.*;
 import ghidra.program.model.symbol.*;
 import ghidra.trace.database.DBTrace;
 import ghidra.trace.database.symbol.DBTraceReference;
+import ghidra.trace.model.Lifespan;
 import ghidra.trace.model.listing.TraceCodeUnit;
 import ghidra.trace.model.memory.TraceMemoryRegion;
 import ghidra.trace.model.program.TraceProgramView;
@@ -42,7 +42,6 @@ import ghidra.trace.model.thread.TraceThread;
 import ghidra.util.LockHold;
 import ghidra.util.Saveable;
 import ghidra.util.exception.NoValueException;
-import ghidra.util.prop.PropertyVisitor;
 
 /**
  * A base interface for implementations of {@link TraceCodeUnit}
@@ -51,7 +50,7 @@ import ghidra.util.prop.PropertyVisitor;
  * This behaves somewhat like a mixin, allowing it to be used on code units as well as data
  * components, e.g., fields of a struct data unit.
  */
-public interface DBTraceCodeUnitAdapter extends TraceCodeUnit, MemBufferAdapter {
+public interface DBTraceCodeUnitAdapter extends TraceCodeUnit, MemBufferMixin {
 
 	@Override
 	DBTrace getTrace();
@@ -172,7 +171,7 @@ public interface DBTraceCodeUnitAdapter extends TraceCodeUnit, MemBufferAdapter 
 				return false;
 			}
 			// NOTE: Properties all defined at start snap
-			return map.getAddressSetView(Range.singleton(getStartSnap())).contains(getAddress());
+			return map.getAddressSetView(Lifespan.at(getStartSnap())).contains(getAddress());
 		}
 	}
 
@@ -190,14 +189,14 @@ public interface DBTraceCodeUnitAdapter extends TraceCodeUnit, MemBufferAdapter 
 			if (space == null) {
 				return false;
 			}
-			return map.getAddressSetView(Range.singleton(getStartSnap())).contains(getAddress());
+			return map.getAddressSetView(Lifespan.at(getStartSnap())).contains(getAddress());
 		}
 	}
 
 	@Override
 	default Iterator<String> propertyNames() {
-		Range<Long> span = Range.singleton(getStartSnap());
-		return Iterators.transform(Iterators.filter(
+		Lifespan span = Lifespan.at(getStartSnap());
+		return IteratorUtils.transformedIterator(IteratorUtils.filteredIterator(
 			getTrace().getInternalAddressPropertyManager().getAllProperties().entrySet().iterator(),
 			e -> e.getValue().getAddressSetView(span).contains(getAddress())), Entry::getKey);
 	}
@@ -215,39 +214,6 @@ public interface DBTraceCodeUnitAdapter extends TraceCodeUnit, MemBufferAdapter 
 	}
 
 	@Override
-	default void visitProperty(PropertyVisitor visitor, String propertyName) {
-		try (LockHold hold = LockHold.lock(getTrace().getReadWriteLock().readLock())) {
-			TracePropertyMapOperations<?> map =
-				getTrace().getInternalAddressPropertyManager().getPropertyMap(propertyName);
-			if (map == null) {
-				return;
-			}
-			if (map.getValueClass() == Void.class) {
-				if (map.getAddressSetView(Range.singleton(getStartSnap())).contains(getAddress())) {
-					visitor.visit();
-				}
-				return;
-			}
-			Object value = map.get(getStartSnap(), getAddress());
-			if (value == null) {
-				return;
-			}
-			if (value instanceof String) {
-				visitor.visit((String) value);
-			}
-			else if (value instanceof Saveable) {
-				visitor.visit((Saveable) value);
-			}
-			else if (value instanceof Integer) {
-				visitor.visit(((Integer) value).intValue());
-			}
-			else {
-				visitor.visit(value);
-			}
-		}
-	}
-
-	@Override
 	default String getLabel() {
 		try (LockHold hold = getTrace().lockRead()) {
 			Symbol primary = getPrimarySymbol();
@@ -258,11 +224,9 @@ public interface DBTraceCodeUnitAdapter extends TraceCodeUnit, MemBufferAdapter 
 	@Override
 	default Symbol[] getSymbols() {
 		try (LockHold hold = getTrace().lockRead()) {
-			Collection<? extends TraceSymbol> at =
-				getTrace().getSymbolManager()
-						.labelsAndFunctions()
-						.getAt(getStartSnap(), getThread(),
-							getAddress(), true);
+			Collection<? extends TraceSymbol> at = getTrace().getSymbolManager()
+					.labels()
+					.getAt(getStartSnap(), getThread(), getAddress(), true);
 			return at.toArray(new TraceSymbol[at.size()]);
 		}
 	}
@@ -270,11 +234,9 @@ public interface DBTraceCodeUnitAdapter extends TraceCodeUnit, MemBufferAdapter 
 	@Override
 	default Symbol getPrimarySymbol() {
 		try (LockHold hold = getTrace().lockRead()) {
-			Collection<? extends TraceSymbol> at =
-				getTrace().getSymbolManager()
-						.labelsAndFunctions()
-						.getAt(getStartSnap(), getThread(),
-							getAddress(), true);
+			Collection<? extends TraceSymbol> at = getTrace().getSymbolManager()
+					.labels()
+					.getAt(getStartSnap(), getThread(), getAddress(), true);
 			if (at.isEmpty()) {
 				return null;
 			}
@@ -314,11 +276,6 @@ public interface DBTraceCodeUnitAdapter extends TraceCodeUnit, MemBufferAdapter 
 	@Override
 	default String[] getCommentAsArray(int commentType) {
 		return DBTraceCommentAdapter.arrayFromComment(getComment(commentType));
-	}
-
-	@Override
-	default boolean isSuccessor(CodeUnit codeUnit) {
-		return getMaxAddress().isSuccessor(codeUnit.getMinAddress());
 	}
 
 	@Override

@@ -15,6 +15,8 @@
  */
 #include "double.hh"
 
+namespace ghidra {
+
 /// Internally, the \b lo and \b hi Varnodes are set to null, and the \b val field
 /// holds the constant value.
 /// \param sz is the size in bytes of the constant
@@ -785,10 +787,14 @@ bool SplitVarnode::isAddrTiedContiguous(Varnode *lo,Varnode *hi,Address &res)
   if (!hi->isAddrTied()) return false;
 
   // Make sure there is no explicit symbol that would prevent the pieces from being joined
-  SymbolEntry *entry = lo->getSymbolEntry();
-  if ((entry != (SymbolEntry *)0)&&(entry->getOffset()==0)) return false;
-  entry = hi->getSymbolEntry();
-  if ((entry != (SymbolEntry *)0)&&(entry->getOffset()==0)) return false;
+  SymbolEntry *entryLo = lo->getSymbolEntry();
+  SymbolEntry *entryHi = hi->getSymbolEntry();
+  if (entryLo != (SymbolEntry *)0 || entryHi != (SymbolEntry *)0) {
+    if (entryLo == (SymbolEntry *)0 || entryHi == (SymbolEntry *)0)
+      return false;		// One is marked with a symbol, the other is not
+    if (entryLo->getSymbol() != entryHi->getSymbol())
+      return false;		// They are part of different symbols
+  }
   AddrSpace *spc = lo->getSpace();
   if (spc != hi->getSpace()) return false;
   uintb looffset = lo->getOffset();
@@ -3091,6 +3097,12 @@ bool IndirectForm::verify(Varnode *h,Varnode *l,PcodeOp *ind)
     if (affector != PcodeOp::getOpFromConst(indlo->getIn(1)->getAddr())) continue;	// hi and lo must be affected by same op
     reslo = indlo->getOut();
     if (reslo->getSpace()->getType() == IPTR_INTERNAL) return false;		// Indirect must not be through a temporary
+    if (reslo->isAddrTied() || reshi->isAddrTied()) {
+      Address addr;
+      // If one piece is address tied, the other must be as well, and they must fit together as contiguous whole
+      if (!SplitVarnode::isAddrTiedContiguous(reslo, reshi, addr))
+	return false;
+    }
     return true;
   }
   return false;
@@ -3484,3 +3496,5 @@ void RuleDoubleStore::reassignIndirects(Funcdata &data,PcodeOp *newStore,const v
     data.opSetInput(op,data.newVarnodeIop(newStore),1);	// Assign the INDIRECT to the new STORE
   }
 }
+
+} // End namespace ghidra

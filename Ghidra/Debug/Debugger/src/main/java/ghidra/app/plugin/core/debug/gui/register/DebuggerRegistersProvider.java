@@ -31,8 +31,7 @@ import javax.swing.table.TableColumnModel;
 
 import org.apache.commons.lang3.exception.ExceptionUtils;
 
-import com.google.common.collect.Range;
-
+import db.Transaction;
 import docking.*;
 import docking.action.*;
 import docking.action.builder.ActionBuilder;
@@ -40,6 +39,7 @@ import docking.actions.PopupActionProvider;
 import docking.widgets.table.*;
 import docking.widgets.table.ColumnSortState.SortDirection;
 import docking.widgets.table.DefaultEnumeratedColumnTableModel.EnumeratedTableColumn;
+import generic.theme.GColor;
 import ghidra.app.plugin.core.data.DataSettingsDialog;
 import ghidra.app.plugin.core.debug.DebuggerCoordinates;
 import ghidra.app.plugin.core.debug.DebuggerPluginPackage;
@@ -47,7 +47,7 @@ import ghidra.app.plugin.core.debug.gui.DebuggerProvider;
 import ghidra.app.plugin.core.debug.gui.DebuggerResources;
 import ghidra.app.plugin.core.debug.mapping.DebuggerRegisterMapper;
 import ghidra.app.services.*;
-import ghidra.app.services.DebuggerStateEditingService.StateEditor;
+import ghidra.app.services.DebuggerControlService.StateEditor;
 import ghidra.async.AsyncLazyValue;
 import ghidra.async.AsyncUtils;
 import ghidra.base.widgets.table.DataTypeTableCellEditor;
@@ -59,27 +59,26 @@ import ghidra.framework.model.DomainObject;
 import ghidra.framework.model.DomainObjectChangeRecord;
 import ghidra.framework.options.AutoOptions;
 import ghidra.framework.options.SaveState;
-import ghidra.framework.options.annotation.*;
 import ghidra.framework.plugintool.*;
 import ghidra.framework.plugintool.annotation.AutoServiceConsumed;
 import ghidra.program.model.address.*;
-import ghidra.program.model.data.DataType;
-import ghidra.program.model.data.DataTypeEncodeException;
+import ghidra.program.model.data.*;
 import ghidra.program.model.lang.*;
 import ghidra.program.model.listing.Data;
 import ghidra.program.model.util.CodeUnitInsertionException;
 import ghidra.trace.model.*;
 import ghidra.trace.model.Trace.*;
+import ghidra.trace.model.guest.TracePlatform;
 import ghidra.trace.model.listing.*;
-import ghidra.trace.model.memory.TraceMemorySpace;
-import ghidra.trace.model.memory.TraceMemoryState;
+import ghidra.trace.model.memory.*;
 import ghidra.trace.model.program.TraceProgramView;
+import ghidra.trace.model.target.TraceObject;
 import ghidra.trace.model.thread.TraceThread;
-import ghidra.trace.util.*;
+import ghidra.trace.util.TraceAddressSpace;
+import ghidra.trace.util.TraceRegisterUtils;
 import ghidra.util.*;
 import ghidra.util.classfinder.ClassSearcher;
 import ghidra.util.data.DataTypeParser.AllowedDataTypes;
-import ghidra.util.database.UndoableTransaction;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.table.GhidraTable;
 import ghidra.util.table.GhidraTableFilterPanel;
@@ -87,6 +86,17 @@ import ghidra.util.task.TaskMonitor;
 
 public class DebuggerRegistersProvider extends ComponentProviderAdapter
 		implements DebuggerProvider, PopupActionProvider {
+	private static final GColor COLOR_BORDER_DISCONNECTED =
+		new GColor("color.border.provider.disconnected");
+	private static final Color COLOR_FOREGROUND_STALE =
+		new GColor("color.debugger.plugin.resources.register.stale");
+	private static final Color COLOR_FOREGROUND_STALE_SEL =
+		new GColor("color.debugger.plugin.resources.register.stale.selected");
+	private static final Color COLOR_FOREGROUND_CHANGED =
+		new GColor("color.debugger.plugin.resources.register.changed");
+	private static final Color COLOR_FOREGROUND_CHANGED_SEL =
+		new GColor("color.debugger.plugin.resources.register.changed.selected");
+
 	private static final String KEY_DEBUGGER_COORDINATES = "DebuggerCoordinates";
 
 	interface ClearRegisterType {
@@ -223,8 +233,8 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 	}
 
 	protected static boolean sameCoordinates(DebuggerCoordinates a, DebuggerCoordinates b) {
-		if (!Objects.equals(a.getTrace(), b.getTrace())) {
-			return false;
+		if (!Objects.equals(a.getPlatform(), b.getPlatform())) {
+			return false; // subsumes trace
 		}
 		if (!Objects.equals(a.getRecorder(), b.getRecorder())) {
 			return false; // For live read/writes
@@ -254,10 +264,22 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 			listenFor(TraceThreadChangeType.LIFESPAN_CHANGED, this::threadDestroyed);
 		}
 
+		private boolean isVisibleObjectsMode(AddressSpace space) {
+			TraceObject container = current.getRegisterContainer();
+			return container != null &&
+				container.getCanonicalPath().toString().equals(space.getName());
+		}
+
 		private boolean isVisible(TraceAddressSpace space) {
 			TraceThread curThread = current.getThread();
 			if (curThread == null) {
 				return false;
+			}
+			if (space.getAddressSpace().isOverlaySpace()) {
+				return isVisibleObjectsMode(space.getAddressSpace());
+			}
+			if (!space.getAddressSpace().isRegisterSpace()) {
+				return true; // Memory-mapped, visible no matter the active thread
 			}
 			if (space.getThread() != curThread) {
 				return false;
@@ -272,6 +294,12 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 			if (!isVisible(space)) {
 				return false;
 			}
+			if (space.getAddressSpace().isMemorySpace()) {
+				return current.getPlatform()
+						.getLanguage()
+						.getRegisterAddresses()
+						.intersects(range.getX1(), range.getX2());
+			}
 			TraceProgramView view = current.getView();
 			if (view == null || !view.getViewport().containsAnyUpper(range.getLifespan())) {
 				return false;
@@ -281,9 +309,9 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 		}
 
 		private void refreshRange(AddressRange range) {
-			TraceMemorySpace space = getRegisterMemorySpace(false);
+			TraceMemorySpace mem = getRegisterMemorySpace(range.getAddressSpace(), false);
 			// ...   If I got an event for it, it ought to exist.
-			assert space != null;
+			assert mem != null;
 
 			// TODO: Just certain rows?
 			regsTableModel.fireTableDataChanged();
@@ -327,7 +355,7 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 		}
 
 		private void registerTypeLifespanChanged(TraceAddressSpace space, TraceCodeUnit unit,
-				Range<Long> oldSpan, Range<Long> newSpan) {
+				Lifespan oldSpan, Lifespan newSpan) {
 			if (!isVisible(space)) {
 				return;
 			}
@@ -356,7 +384,7 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 			//checkEditsEnabled();
 		}
 
-		private void threadDestroyed(TraceThread thread, Range<Long> oldSpan, Range<Long> newSpan) {
+		private void threadDestroyed(TraceThread thread, Lifespan oldSpan, Lifespan newSpan) {
 			//checkEditsEnabled();
 		}
 	}
@@ -380,18 +408,18 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 			RegisterRow row = (RegisterRow) data.getRowObject();
 			if (!row.isKnown()) {
 				if (data.isSelected()) {
-					setForeground(registerStaleSelColor);
+					setForeground(COLOR_FOREGROUND_STALE_SEL);
 				}
 				else {
-					setForeground(registerStaleColor);
+					setForeground(COLOR_FOREGROUND_STALE);
 				}
 			}
 			else if (row.isChanged()) {
 				if (data.isSelected()) {
-					setForeground(registerChangesSelColor);
+					setForeground(COLOR_FOREGROUND_CHANGED_SEL);
 				}
 				else {
-					setForeground(registerChangesColor);
+					setForeground(COLOR_FOREGROUND_CHANGED);
 				}
 			}
 			return this;
@@ -422,8 +450,7 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 			if (dataType == null) {
 				return null;
 			}
-			try (UndoableTransaction tid =
-				UndoableTransaction.start(currentTrace, "Resolve DataType")) {
+			try (Transaction tx = currentTrace.openTransaction("Resolve DataType")) {
 				return currentTrace.getDataTypeManager().resolve(dataType, null);
 			}
 		}
@@ -439,41 +466,18 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 	private AsyncLazyValue<Void> readTheseCoords =
 		new AsyncLazyValue<>(this::readRegistersIfLiveAndAccessible); /* "read" past tense */
 	private Trace currentTrace; // Copy for transition
-	private TraceRecorder currentRecorder; // Copy of transition
+	private TraceRecorder currentRecorder; // Copy for transition
 
-	@AutoServiceConsumed
-	private DebuggerModelService modelService;
 	@AutoServiceConsumed
 	private DebuggerTraceManagerService traceManager;
 	@AutoServiceConsumed
 	private DebuggerListingService listingService;
 	@AutoServiceConsumed
-	private DebuggerStateEditingService editingService;
+	private DebuggerControlService controlService;
 	@AutoServiceConsumed
 	private MarkerService markerService; // TODO: Mark address types (separate plugin?)
 	@SuppressWarnings("unused")
 	private final AutoService.Wiring autoServiceWiring;
-
-	@AutoOptionDefined(
-		name = DebuggerResources.OPTION_NAME_COLORS_REGISTER_STALE, //
-		description = "Text color for registers whose value is not known", //
-		help = @HelpInfo(anchor = "colors"))
-	protected Color registerStaleColor = DebuggerResources.DEFAULT_COLOR_REGISTER_STALE;
-	@AutoOptionDefined(
-		name = DebuggerResources.OPTION_NAME_COLORS_REGISTER_STALE_SEL, //
-		description = "Selected text color for registers whose value is not known", //
-		help = @HelpInfo(anchor = "colors"))
-	protected Color registerStaleSelColor = DebuggerResources.DEFAULT_COLOR_REGISTER_STALE_SEL;
-	@AutoOptionDefined(
-		name = DebuggerResources.OPTION_NAME_COLORS_REGISTER_CHANGED, //
-		description = "Text color for registers whose value just changed", //
-		help = @HelpInfo(anchor = "colors"))
-	protected Color registerChangesColor = DebuggerResources.DEFAULT_COLOR_REGISTER_CHANGED;
-	@AutoOptionDefined(
-		name = DebuggerResources.OPTION_NAME_COLORS_REGISTER_CHANGED_SEL, //
-		description = "Selected text color for registers whose value just changed", //
-		help = @HelpInfo(anchor = "colors"))
-	protected Color registerChangesSelColor = DebuggerResources.DEFAULT_COLOR_REGISTER_CHANGED_SEL;
 
 	@SuppressWarnings("unused")
 	private final AutoOptions.Wiring autoOptionsWiring;
@@ -498,7 +502,6 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 
 	DebuggerRegisterActionContext myActionContext;
 	AddressSetView viewKnown;
-	AddressSetView catalog;
 
 	protected DebuggerRegistersProvider(final DebuggerRegistersPlugin plugin,
 			Map<LanguageCompilerSpecPair, LinkedHashSet<Register>> selectionByCSpec,
@@ -533,7 +536,7 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 			setTitle("[" + DebuggerResources.TITLE_PROVIDER_REGISTERS + "]");
 			setWindowGroup("Debugger.Core.disconnected");
 			setIntraGroupPosition(WindowPosition.STACK);
-			mainPanel.setBorder(BorderFactory.createLineBorder(Color.ORANGE, 2));
+			mainPanel.setBorder(BorderFactory.createLineBorder(COLOR_BORDER_DISCONNECTED, 2));
 			setTransient();
 		}
 		else {
@@ -547,6 +550,8 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 
 	@Override
 	public void removeFromTool() {
+		availableRegsDialog.dispose();
+
 		plugin.providerRemoved(this);
 		plugin.getTool().removePopupActionProvider(this);
 		super.removeFromTool();
@@ -560,6 +565,9 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 		mainPanel.add(regsFilterPanel, BorderLayout.SOUTH);
 
 		regsTable.getSelectionModel().addListSelectionListener(evt -> {
+			if (evt.getValueIsAdjusting()) {
+				return;
+			}
 			myActionContext = new DebuggerRegisterActionContext(this,
 				regsFilterPanel.getSelectedItem(), regsTable);
 			contextChanged();
@@ -567,7 +575,7 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 		regsTable.addMouseListener(new MouseAdapter() {
 			@Override
 			public void mouseClicked(MouseEvent e) {
-				if (e.getClickCount() == 2) {
+				if (e.getClickCount() == 2 && e.getButton() == MouseEvent.BUTTON1) {
 					navigateToAddress();
 				}
 			}
@@ -647,7 +655,7 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 		if (data == null || data.getValueClass() != Address.class) {
 			return;
 		}
-		Address address = (Address) TraceRegisterUtils.getValueHackPointer(data);
+		Address address = (Address) data.getValue();
 		if (address == null) {
 			return;
 		}
@@ -691,14 +699,14 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 	}
 
 	private void selectRegistersActivated() {
-		TraceThread curThread = current.getThread();
-		if (curThread == null) {
+		TracePlatform curPlatform = current.getPlatform();
+		if (current.getThread() == null) {
 			return;
 		}
-		availableRegsDialog.setLanguage(curThread.getTrace().getBaseLanguage());
-		Set<Register> viewKnown = computeDefaultRegisterSelection(curThread);
+		availableRegsDialog.setLanguage(curPlatform.getLanguage());
+		Set<Register> viewKnown = computeDefaultRegisterSelection(curPlatform);
 		availableRegsDialog.setKnown(viewKnown);
-		Set<Register> selection = getSelectionFor(curThread);
+		Set<Register> selection = getSelectionFor(curPlatform);
 		// NOTE: Modifies selection in place
 		availableRegsDialog.setSelection(selection);
 		tool.showDialog(availableRegsDialog);
@@ -777,20 +785,6 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 		removeOldTraceListener();
 		this.currentTrace = trace;
 		addNewTraceListener();
-
-		catalogRegisterAddresses();
-	}
-
-	private void catalogRegisterAddresses() {
-		this.catalog = null;
-		if (currentTrace == null) {
-			return;
-		}
-		AddressSet catalog = new AddressSet();
-		for (Register reg : currentTrace.getBaseLanguage().getRegisters()) {
-			catalog.add(TraceRegisterUtils.rangeForRegister(reg));
-		}
-		this.catalog = catalog;
 	}
 
 	private void removeOldRecorderListener() {
@@ -830,6 +824,7 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 		doSetRecorder(current.getRecorder());
 		updateSubTitle();
 
+		prepareRegisterSpace();
 		recomputeViewKnown();
 		loadRegistersAndValues();
 		contextChanged();
@@ -849,19 +844,20 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 		if (!isEditsEnabled()) {
 			return false;
 		}
-		if (editingService == null) {
+		if (controlService == null) {
 			return false;
 		}
-		StateEditor editor = editingService.createStateEditor(current);
+		StateEditor editor = controlService.createStateEditor(current);
 		return editor.isRegisterEditable(register);
 	}
 
 	BigInteger getRegisterValue(Register register) {
-		TraceMemorySpace regs = getRegisterMemorySpace(false);
+		TraceMemorySpace regs = getRegisterMemorySpace(register.getAddressSpace(), false);
 		if (regs == null) {
 			return BigInteger.ZERO;
 		}
-		return regs.getViewValue(current.getViewSnap(), register).getUnsignedValue();
+		return regs.getViewValue(current.getPlatform(), current.getViewSnap(), register)
+				.getUnsignedValue();
 	}
 
 	void writeRegisterValue(Register register, BigInteger value) {
@@ -869,17 +865,14 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 	}
 
 	void writeRegisterValue(RegisterValue rv) {
-		if (editingService == null) {
-			Msg.showError(this, getComponent(), "Edit Register", "No editing service.");
+		if (controlService == null) {
+			Msg.showError(this, getComponent(), "Edit Register", "No control service.");
 			return;
 		}
-		StateEditor editor = editingService.createStateEditor(current);
-		if (!editor.isRegisterEditable(rv.getRegister())) {
-			rv = combineWithTraceBaseRegisterValue(rv);
-		}
+		StateEditor editor = controlService.createStateEditor(current);
 		if (!editor.isRegisterEditable(rv.getRegister())) {
 			Msg.showError(this, getComponent(), "Edit Register",
-				"Neither the register nor its base can be edited.");
+				"Neither the register nor any parent can be edited.");
 			return;
 		}
 
@@ -900,25 +893,42 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 		return;
 	}
 
-	private RegisterValue combineWithTraceBaseRegisterValue(RegisterValue rv) {
-		TraceMemorySpace regs = getRegisterMemorySpace(false);
-		long snap = current.getViewSnap();
-		return TraceRegisterUtils.combineWithTraceBaseRegisterValue(rv, snap, regs, true);
-	}
-
 	/**
 	 * TODO: Make this smart enough to replace a component type when applicable? NOTE: Would require
 	 * cloning the type to avoid effects elsewhere. Maybe just keep a dedicated data type for this
 	 * register and modify it.... Well, that works until you consider changes in time....
 	 */
 	void writeRegisterDataType(Register register, DataType dataType) {
-		try (UndoableTransaction tid =
-			UndoableTransaction.start(current.getTrace(), "Edit Register Type")) {
-			TraceCodeSpace space = getRegisterMemorySpace(true).getCodeSpace(true);
+		try (Transaction tx = current.getTrace().openTransaction("Edit Register Type")) {
+			if (dataType instanceof Pointer ptrType && register.getAddress().isRegisterAddress()) {
+				// Because we're about to use the size, resolve it first
+				ptrType = (Pointer) current.getTrace()
+						.getDataTypeManager()
+						.resolve(dataType, DataTypeConflictHandler.DEFAULT_HANDLER);
+				/**
+				 * TODO: This should be the current platform instead, but it's not clear how to do
+				 * that. The PointerTypedef uses the program (taken from the MemBuffer) to lookup
+				 * the configured address space by name. Might be better if MemBuffer/CodeUnit had
+				 * getAddressFactory(). Still, I'd need guest-platform data units before I could
+				 * override that meaningfully.
+				 */
+				/**
+				 * AddressSpace space =
+				 * current.getPlatform().getAddressFactory().getDefaultAddressSpace();
+				 */
+				AddressSpace space =
+					current.getTrace().getBaseAddressFactory().getDefaultAddressSpace();
+				dataType = new PointerTypedef(null, ptrType.getDataType(), ptrType.getLength(),
+					ptrType.getDataTypeManager(), space);
+			}
+			TraceCodeSpace code =
+				getRegisterMemorySpace(register.getAddressSpace(), true).getCodeSpace(true);
 			long snap = current.getViewSnap();
-			space.definedUnits().clear(Range.closed(snap, snap), register, TaskMonitor.DUMMY);
+			TracePlatform platform = current.getPlatform();
+			code.definedUnits()
+					.clear(platform, Lifespan.at(snap), register, TaskMonitor.DUMMY);
 			if (dataType != null) {
-				space.definedData().create(Range.atLeast(snap), register, dataType);
+				code.definedData().create(platform, Lifespan.nowOn(snap), register, dataType);
 			}
 		}
 		catch (CodeUnitInsertionException | CancelledException e) {
@@ -927,12 +937,13 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 	}
 
 	TraceData getRegisterData(Register register) {
-		TraceCodeSpace space = getRegisterCodeSpace(false);
+		TraceCodeSpace space = getRegisterCodeSpace(register.getAddressSpace(), false);
 		if (space == null) {
 			return null;
 		}
+		TracePlatform platform = current.getPlatform();
 		long snap = current.getViewSnap();
-		return space.definedData().getForRegister(snap, register);
+		return space.definedData().getForRegister(platform, snap, register);
 	}
 
 	DataType getRegisterDataType(Register register) {
@@ -977,30 +988,73 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 		if (data == null) {
 			return null;
 		}
-		return TraceRegisterUtils.getValueRepresentationHackPointer(data);
+		return data.getDefaultValueRepresentation();
+	}
+
+	/**
+	 * Ensure the register space exists and has been populated from register object values.
+	 * 
+	 * <p>
+	 * TODO: I wish this were not necessary. Maybe I should create the space when register object
+	 * values are populated.
+	 */
+	void prepareRegisterSpace() {
+		Trace trace = current.getTrace();
+		if (current.getThread() != null && trace.getObjectManager().getRootSchema() != null) {
+			AddressSpace regSpace = current.getPlatform().getAddressFactory().getRegisterSpace();
+			if (regSpace != null) {
+				try (Transaction tx = trace.openTransaction("Create/initialize register space")) {
+					getRegisterMemorySpace(regSpace, true);
+				}
+			}
+		}
 	}
 
 	void recomputeViewKnown() {
-		if (catalog == null) {
+		TracePlatform platform = current.getPlatform();
+		if (platform == null) {
 			viewKnown = null;
 			return;
 		}
-		TraceMemorySpace regs = getRegisterMemorySpace(false);
 		TraceProgramView view = current.getView();
-		if (regs == null || view == null) {
+		if (view == null) {
 			viewKnown = null;
 			return;
 		}
-		viewKnown = new AddressSet(view.getViewport()
-				.unionedAddresses(snap -> regs.getAddressesWithState(snap, catalog,
-					state -> state == TraceMemoryState.KNOWN)));
+		TraceMemoryManager mem = current.getTrace().getMemoryManager();
+		AddressSetView guestRegs = platform.getLanguage().getRegisterAddresses();
+		AddressSetView hostRegs = platform.mapGuestToHost(guestRegs);
+		AddressSetView viewKnownMem = view.getViewport()
+				.unionedAddresses(snap -> mem.getAddressesWithState(snap, hostRegs,
+					state -> state == TraceMemoryState.KNOWN));
+		AddressSpace regSpace = platform.getAddressFactory().getRegisterSpace();
+		if (regSpace == null) {
+			viewKnown = new AddressSet(viewKnownMem);
+			return;
+		}
+		TraceMemorySpace regs = getRegisterMemorySpace(current, regSpace, false);
+		if (regs == null) {
+			viewKnown = new AddressSet(viewKnownMem);
+			return;
+		}
+		AddressSetView overlayRegs =
+			TraceRegisterUtils.getOverlaySet(regs.getAddressSpace(), hostRegs);
+		AddressSetView viewKnownRegs = view.getViewport()
+				.unionedAddresses(snap -> regs.getAddressesWithState(snap, overlayRegs,
+					state -> state == TraceMemoryState.KNOWN));
+		viewKnown = viewKnownRegs.union(viewKnownMem);
 	}
 
 	boolean isRegisterKnown(Register register) {
 		if (viewKnown == null) {
 			return false;
 		}
-		AddressRange range = TraceRegisterUtils.rangeForRegister(register);
+		TraceMemorySpace regs = getRegisterMemorySpace(current, register.getAddressSpace(), false);
+		if (regs == null && register.getAddressSpace().isRegisterSpace()) {
+			return false;
+		}
+		AddressRange range =
+			current.getPlatform().getConventionalRegisterRange(regs.getAddressSpace(), register);
 		return viewKnown.contains(range.getMinAddress(), range.getMaxAddress());
 	}
 
@@ -1008,19 +1062,23 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 		if (previous.getThread() == null || current.getThread() == null) {
 			return false;
 		}
-		if (previous.getTrace().getBaseLanguage() != current.getTrace().getBaseLanguage()) {
+		if (previous.getPlatform().getLanguage() != current.getPlatform().getLanguage()) {
 			return false;
 		}
 		if (!isRegisterKnown(register)) {
 			return false;
 		}
-		TraceMemorySpace curSpace = getRegisterMemorySpace(current, false);
-		TraceMemorySpace prevSpace = getRegisterMemorySpace(previous, false);
+		TraceMemorySpace curSpace =
+			getRegisterMemorySpace(current, register.getAddressSpace(), false);
+		TraceMemorySpace prevSpace =
+			getRegisterMemorySpace(previous, register.getAddressSpace(), false);
 		if (prevSpace == null) {
 			return false;
 		}
-		RegisterValue curRegVal = curSpace.getViewValue(current.getViewSnap(), register);
-		RegisterValue prevRegVal = prevSpace.getViewValue(previous.getViewSnap(), register);
+		RegisterValue curRegVal =
+			curSpace.getViewValue(current.getPlatform(), current.getViewSnap(), register);
+		RegisterValue prevRegVal =
+			prevSpace.getViewValue(current.getPlatform(), previous.getViewSnap(), register);
 		return !Objects.equals(curRegVal, prevRegVal);
 	}
 
@@ -1031,8 +1089,10 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 	/**
 	 * Gather general registers, the program counter, and the stack pointer
 	 * 
+	 * <p>
 	 * This excludes the context register
 	 * 
+	 * <p>
 	 * TODO: Several pspec files need adjustment to clean up "common registers"
 	 * 
 	 * @param cSpec the compiler spec
@@ -1061,51 +1121,24 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 		return result;
 	}
 
-	public LinkedHashSet<Register> computeDefaultRegisterSelection(TraceThread thread) {
-		return collectCommonRegisters(thread.getTrace().getBaseCompilerSpec());
+	public LinkedHashSet<Register> computeDefaultRegisterSelection(TracePlatform platform) {
+		return collectCommonRegisters(platform.getCompilerSpec());
 	}
 
-	public LinkedHashSet<Register> computeDefaultRegisterFavorites(TraceThread thread) {
+	public LinkedHashSet<Register> computeDefaultRegisterFavorites(TracePlatform platform) {
 		LinkedHashSet<Register> favorites = new LinkedHashSet<>();
-		CompilerSpec cSpec = thread.getTrace().getBaseCompilerSpec();
-		favorites.add(cSpec.getLanguage().getProgramCounter());
-		favorites.add(cSpec.getStackPointer());
+		favorites.add(platform.getLanguage().getProgramCounter());
+		favorites.add(platform.getCompilerSpec().getStackPointer());
 		return favorites;
 	}
 
-	public LinkedHashSet<Register> computeDefaultRegistersOld(TraceThread thread) {
-		LinkedHashSet<Register> viewKnown = new LinkedHashSet<>();
-		/**
-		 * NOTE: It is rare that this includes registers outside of those common to the view and
-		 * target, but in case the user has manually populated such registers, this will ensure they
-		 * are visible in the UI.
-		 * 
-		 * Also, in case the current thread is not live, we want the DB values to appear.
-		 */
-		viewKnown.addAll(collectBaseRegistersWithKnownValues(thread));
-		Trace trace = thread.getTrace();
-		TraceRecorder recorder = modelService.getRecorder(trace);
-		if (recorder == null) {
-			viewKnown.addAll(collectCommonRegisters(trace.getBaseCompilerSpec()));
-			return viewKnown;
-		}
-		TargetThread targetThread = recorder.getTargetThread(thread);
-		if (targetThread == null || !recorder.isRegisterBankAccessible(thread, 0)) {
-			return viewKnown;
-		}
-		DebuggerRegisterMapper regMapper = recorder.getRegisterMapper(thread);
-		if (regMapper == null) {
-			return viewKnown;
-		}
-		for (Register onTarget : regMapper.getRegistersOnTarget()) {
-			viewKnown.add(onTarget);
-			viewKnown.addAll(onTarget.getChildRegisters());
-		}
-		return viewKnown;
-	}
-
 	protected static TraceMemorySpace getRegisterMemorySpace(DebuggerCoordinates coords,
-			boolean createIfAbsent) {
+			AddressSpace space, boolean createIfAbsent) {
+		if (!space.isRegisterSpace()) {
+			return coords.getTrace()
+					.getMemoryManager()
+					.getMemorySpace(space, createIfAbsent);
+		}
 		TraceThread thread = coords.getThread();
 		if (thread == null) {
 			return null;
@@ -1115,18 +1148,29 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 				.getMemoryRegisterSpace(thread, coords.getFrame(), createIfAbsent);
 	}
 
-	protected TraceMemorySpace getRegisterMemorySpace(boolean createIfAbsent) {
-		return getRegisterMemorySpace(current, createIfAbsent);
+	protected TraceMemorySpace getRegisterMemorySpace(AddressSpace space,
+			boolean createIfAbsent) {
+		return getRegisterMemorySpace(current, space, createIfAbsent);
 	}
 
-	protected TraceCodeSpace getRegisterCodeSpace(boolean createIfAbsent) {
-		TraceThread curThread = current.getThread();
-		if (curThread == null) {
+	protected static TraceCodeSpace getRegisterCodeSpace(DebuggerCoordinates coords,
+			AddressSpace space, boolean createIfAbsent) {
+		if (!space.isRegisterSpace()) {
+			return coords.getTrace()
+					.getCodeManager()
+					.getCodeSpace(space, createIfAbsent);
+		}
+		TraceThread thread = coords.getThread();
+		if (thread == null) {
 			return null;
 		}
-		return current.getTrace()
+		return coords.getTrace()
 				.getCodeManager()
-				.getCodeRegisterSpace(curThread, current.getFrame(), createIfAbsent);
+				.getCodeRegisterSpace(thread, coords.getFrame(), createIfAbsent);
+	}
+
+	protected TraceCodeSpace getRegisterCodeSpace(AddressSpace space, boolean createIfAbsent) {
+		return getRegisterCodeSpace(current, space, createIfAbsent);
 	}
 
 	protected Set<Register> collectBaseRegistersWithKnownValues(TraceThread thread) {
@@ -1163,33 +1207,29 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 		return result;
 	}
 
-	protected LanguageCompilerSpecPair getLangCSpecPair(Trace trace) {
-		return new LanguageCompilerSpecPair(trace.getBaseLanguage().getLanguageID(),
-			trace.getBaseCompilerSpec().getCompilerSpecID());
+	protected static LanguageCompilerSpecPair getLangCSpecPair(TracePlatform platform) {
+		return new LanguageCompilerSpecPair(platform.getLanguage().getLanguageID(),
+			platform.getCompilerSpec().getCompilerSpecID());
 	}
 
-	protected LanguageCompilerSpecPair getLangCSpecPair(TraceThread thread) {
-		return getLangCSpecPair(thread.getTrace());
-	}
-
-	protected Set<Register> getSelectionFor(TraceThread thread) {
+	protected Set<Register> getSelectionFor(TracePlatform platform) {
 		synchronized (selectionByCSpec) {
-			LanguageCompilerSpecPair lcsp = getLangCSpecPair(thread);
+			LanguageCompilerSpecPair lcsp = getLangCSpecPair(platform);
 			return selectionByCSpec.computeIfAbsent(lcsp,
-				__ -> computeDefaultRegisterSelection(thread));
+				__ -> computeDefaultRegisterSelection(platform));
 		}
 	}
 
-	protected Set<Register> getFavoritesFor(TraceThread thread) {
+	protected Set<Register> getFavoritesFor(TracePlatform platform) {
 		synchronized (favoritesByCSpec) {
-			LanguageCompilerSpecPair lcsp = getLangCSpecPair(thread);
+			LanguageCompilerSpecPair lcsp = getLangCSpecPair(platform);
 			return favoritesByCSpec.computeIfAbsent(lcsp,
-				__ -> computeDefaultRegisterFavorites(thread));
+				__ -> computeDefaultRegisterFavorites(platform));
 		}
 	}
 
 	protected void setFavorite(Register register, boolean favorite) {
-		Set<Register> favorites = getFavoritesFor(current.getThread());
+		Set<Register> favorites = getFavoritesFor(current.getPlatform());
 		if (favorite) {
 			favorites.add(register);
 		}
@@ -1199,13 +1239,13 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 	}
 
 	public boolean isFavorite(Register register) {
-		Set<Register> favorites = getFavoritesFor(current.getThread());
+		Set<Register> favorites = getFavoritesFor(current.getPlatform());
 		return favorites.contains(register);
 	}
 
 	public CompletableFuture<Void> setSelectedRegistersAndLoad(
 			Collection<Register> selectedRegisters) {
-		Set<Register> selection = getSelectionFor(current.getThread());
+		Set<Register> selection = getSelectionFor(current.getPlatform());
 		selection.clear();
 		selection.addAll(new TreeSet<>(selectedRegisters));
 		return loadRegistersAndValues();
@@ -1226,7 +1266,7 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 	}
 
 	protected void displaySelectedRegisters(Set<Register> selected) {
-		List<Register> regs = currentTrace.getBaseLanguage().getRegisters();
+		List<Register> regs = current.getPlatform().getLanguage().getRegisters();
 		for (Iterator<Entry<Register, RegisterRow>> it = regMap.entrySet().iterator(); it
 				.hasNext();) {
 			Map.Entry<Register, RegisterRow> ent = it.next();
@@ -1246,13 +1286,12 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 	}
 
 	protected CompletableFuture<Void> loadRegistersAndValues() {
-		TraceThread curThread = current.getThread();
-		if (curThread == null) {
+		if (current.getThread() == null) {
 			regsTableModel.clear();
 			regMap.clear();
 			return AsyncUtils.NIL;
 		}
-		Set<Register> selected = getSelectionFor(curThread);
+		Set<Register> selected = getSelectionFor(current.getPlatform());
 		displaySelectedRegisters(selected);
 		return loadValues();
 	}
@@ -1272,6 +1311,31 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 		return regs.stream().filter(Register::isBaseRegister).collect(Collectors.toSet());
 	}
 
+	protected CompletableFuture<?> readRegistersLegacy(TraceRecorder recorder,
+			TraceThread traceThread, Set<Register> toRead) {
+		DebuggerRegisterMapper regMapper = recorder.getRegisterMapper(traceThread);
+		if (regMapper == null) {
+			Msg.error(this, "Target is live, but we haven't got a register mapper, yet");
+			return AsyncUtils.NIL;
+		}
+		toRead.retainAll(regMapper.getRegistersOnTarget());
+		Set<TargetRegisterBank> banks =
+			recorder.getTargetRegisterBanks(traceThread, current.getFrame());
+		if (banks == null || banks.isEmpty()) {
+			Msg.error(this, "Current frame's bank does not exist");
+			return AsyncUtils.NIL;
+		}
+		// TODO: Should probably always be the host platform. I suspect it's ignored anyway.
+		return recorder.captureThreadRegisters(current.getPlatform(), traceThread,
+			current.getFrame(), toRead);
+	}
+
+	protected CompletableFuture<?> readRegistersObjectMode(TraceRecorder recorder,
+			TraceThread traceThread, Set<Register> toRead) {
+		return recorder.captureThreadRegisters(current.getPlatform(), traceThread,
+			current.getFrame(), toRead);
+	}
+
 	protected CompletableFuture<Void> readRegistersIfLiveAndAccessible() {
 		TraceRecorder recorder = current.getRecorder();
 		if (recorder == null) {
@@ -1280,69 +1344,32 @@ public class DebuggerRegistersProvider extends ComponentProviderAdapter
 		if (recorder.getSnap() != current.getSnap()) {
 			return AsyncUtils.NIL;
 		}
-		if (current.getFrame() == 0) {
-			// Should have been pushed by model. non-zero frames are poll-only
-			return AsyncUtils.NIL;
-		}
+//		if (current.getFrame() == 0) {
+//			// Should have been pushed by model. non-zero frames are poll-only
+//			return AsyncUtils.NIL;
+//		}
 		TraceThread traceThread = current.getThread();
 		TargetThread targetThread = recorder.getTargetThread(traceThread);
 		if (targetThread == null) {
 			return AsyncUtils.NIL;
 		}
-		Set<Register> toRead = new HashSet<>(baseRegisters(getSelectionFor(traceThread)));
-		DebuggerRegisterMapper regMapper = recorder.getRegisterMapper(traceThread);
-		if (regMapper == null) {
-			Msg.error(this, "Target is live, but we haven't got a register mapper, yet");
-			return AsyncUtils.NIL;
+
+		Set<Register> toRead = new HashSet<>(baseRegisters(getSelectionFor(current.getPlatform())));
+
+		CompletableFuture<?> future;
+		if (current.getTrace().getObjectManager().getRootSchema() == null) {
+			future = readRegistersLegacy(recorder, traceThread, toRead);
 		}
-		toRead.retainAll(regMapper.getRegistersOnTarget());
-		TargetRegisterBank bank = recorder.getTargetRegisterBank(traceThread, current.getFrame());
-		if (bank == null || !bank.isValid()) {
-			Msg.error(this, "Current frame's bank does not exist");
-			return AsyncUtils.NIL;
+		else {
+			future = readRegistersObjectMode(recorder, traceThread, toRead);
 		}
-		CompletableFuture<?> future =
-			recorder.captureThreadRegisters(traceThread, current.getFrame(), toRead);
 		return future.exceptionally(ex -> {
 			ex = AsyncUtils.unwrapThrowable(ex);
-			if (ex instanceof DebuggerModelAccessException) {
-				String msg =
-					"Could not read target registers for selected thread: " + ex.getMessage();
-				Msg.info(this, msg);
-				plugin.getTool().setStatusInfo(msg);
-			}
-			else {
-				Msg.showError(this, getComponent(), "Read Target Registers",
-					"Could not read target registers for selected thread", ex);
-			}
+			String msg = "Could not read target registers for selected thread: " + ex.getMessage();
+			Msg.info(this, msg);
+			plugin.getTool().setStatusInfo(msg);
 			return ExceptionUtils.rethrow(ex);
 		}).thenApply(__ -> null);
-	}
-
-	private void repaintTable() {
-		if (regsTable != null) {
-			regsTable.repaint();
-		}
-	}
-
-	@AutoOptionConsumed(name = DebuggerResources.OPTION_NAME_COLORS_REGISTER_STALE)
-	private void setRegisterStaleColor(Color color) {
-		repaintTable();
-	}
-
-	@AutoOptionConsumed(name = DebuggerResources.OPTION_NAME_COLORS_REGISTER_STALE_SEL)
-	private void setRegisterStaleSelColor(Color color) {
-		repaintTable();
-	}
-
-	@AutoOptionConsumed(name = DebuggerResources.OPTION_NAME_COLORS_REGISTER_CHANGED)
-	private void setRegisterChangesColor(Color color) {
-		repaintTable();
-	}
-
-	@AutoOptionConsumed(name = DebuggerResources.OPTION_NAME_COLORS_REGISTER_CHANGED_SEL)
-	private void setRegisterChangesSelColor(Color color) {
-		repaintTable();
 	}
 
 	protected String formatAddressInfo(Address address) {
