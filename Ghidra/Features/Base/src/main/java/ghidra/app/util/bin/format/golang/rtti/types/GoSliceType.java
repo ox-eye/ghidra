@@ -43,22 +43,24 @@ public class GoSliceType extends GoType {
 		return programContext.getGoType(elem);
 	}
 
-	@Override
 	public DataType recoverDataType() throws IOException {
-		int arrayPtrComponentIndex = 0; /* HACK, field ordinal of void* data field in slice type */
-		Structure genericSliceDT = programContext.getGenericSliceDT();
-		DataTypeComponent arrayDTC = genericSliceDT.getComponent(arrayPtrComponentIndex);
+		StructureDataType sliceDT = new StructureDataType(programContext.getRecoveredTypesCp(),
+				typ.getNameString(), 0, programContext.getDTM());
+		programContext.cacheRecoveredDataType(this, sliceDT);
 
+		Structure genericSliceDT = programContext.getGenericSliceDT();
+
+		// fixup the generic void* field with the specific element* type
 		GoType elementType = getElement();
 		DataType elementDT = elementType.recoverDataType();
 		Pointer elementPtrDT = programContext.getDTM().getPointer(elementDT);
 
-		StructureDataType sliceDT =
-			new StructureDataType(programContext.getRecoveredTypesCp(), typ.getNameString(), 0,
-				programContext.getDTM());
 		sliceDT.replaceWith(genericSliceDT);
+
+		int arrayPtrComponentIndex = 0; /* HACK, field ordinal of void* data field in slice type */
+		DataTypeComponent arrayDTC = genericSliceDT.getComponent(arrayPtrComponentIndex);
 		sliceDT.replace(arrayPtrComponentIndex, elementPtrDT, -1, arrayDTC.getFieldName(),
-			arrayDTC.getComment());
+				arrayDTC.getComment());
 
 		return sliceDT;
 	}
