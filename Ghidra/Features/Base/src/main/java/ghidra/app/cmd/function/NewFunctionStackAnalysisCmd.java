@@ -29,6 +29,7 @@ import ghidra.program.model.listing.Function.FunctionUpdateType;
 import ghidra.program.model.pcode.PcodeOp;
 import ghidra.program.model.pcode.Varnode;
 import ghidra.program.model.scalar.Scalar;
+import ghidra.util.SkipManager;
 import ghidra.program.model.symbol.*;
 import ghidra.program.util.*;
 import ghidra.util.Msg;
@@ -104,23 +105,25 @@ public class NewFunctionStackAnalysisCmd extends BackgroundCommand {
 
 		monitor.initialize(numAddresses);
 		FunctionIterator functions = program.getFunctionManager().getFunctions(entryPoints, true);
+		SkipManager m = SkipManager.getInstance();
 		while (functions.hasNext()) {
 			if (monitor.isCancelled()) {
 				break;
 			}
 
 			Function func = functions.next();
+			boolean shouldSkip = m.shouldSkip(func.getName());
 			monitor.setProgress(++count);
 
 			monitor.setMessage("Stack " + func.getName());
-
-			try {
-				if (!analyzeFunction(func, monitor)) {
-					setStatusMsg("Function overlaps an existing function body");
+			if(!shouldSkip) {
+				try {
+					if (!analyzeFunction(func, monitor)) {
+						setStatusMsg("Function overlaps an existing function body");
+					}
+				} catch (CancelledException e) {
+					//
 				}
-			}
-			catch (CancelledException e) {
-				//
 			}
 		}
 		if (monitor.isCancelled()) {

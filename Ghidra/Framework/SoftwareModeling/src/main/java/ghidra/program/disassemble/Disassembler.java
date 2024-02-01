@@ -28,6 +28,7 @@ import ghidra.program.model.address.*;
 import ghidra.program.model.lang.*;
 import ghidra.program.model.lang.InstructionError.InstructionErrorType;
 import ghidra.program.model.listing.*;
+import ghidra.util.SkipManager;
 import ghidra.program.model.mem.*;
 import ghidra.program.model.pcode.PcodeOp;
 import ghidra.program.model.symbol.FlowType;
@@ -600,7 +601,6 @@ public class Disassembler implements DisassemblerConflictHandler {
 				disassemblerContext.setFutureRegisterValue(startAddr, initialValue);
 			}
 		}
-
 		while (disassemblerQueue.continueProducingInstructionSets(monitor)) {
 
 			try {
@@ -677,11 +677,18 @@ public class Disassembler implements DisassemblerConflictHandler {
 		Address fallThruAddr = firstBlock.getStartAddress(); // allow us to enter loop with initial block
 
 		InstructionBlock nextBlock;
+		SkipManager m = SkipManager.getInstance();
 		while ((nextBlock = disassemblerQueue.getNextBlockToBeDisassembled(fallThruAddr,
 			programMemBuffer.getMemory(), monitor)) != null) {
 
 			Address blockAddr = disassemblerQueue.getDisassemblyAddress();
 
+			boolean shouldSkip = m.shouldSkip(blockAddr.getOffset());
+			if (shouldSkip) {
+				programMemBuffer.setPosition(blockAddr);
+				fallThruAddr = nextBlock.getFallThrough();
+				continue;
+			}
 			if (!disassemblerContext.isFlowActive()) {
 				disassemblerContext.flowStart(blockAddr);
 			}

@@ -46,9 +46,7 @@ dependencies {
 	api 'biz.aQute.bnd:biz.aQute.bnd.util:6.2.0'
 	api ('biz.aQute.bnd:biz.aQute.bndlib:6.2.0') {exclude group: 'org.osgi'}
 	api ('org.osgi:org.osgi.util.promise:1.2.0') {exclude group: 'org.osgi'}
-	api 'org.slf4j:slf4j-api:1.7.25'
-	
-	runtimeOnly "org.slf4j:slf4j-nop:1.7.25"
+	api 'org.slf4j:slf4j-api:2.0.4'
 	
 	// use this if you want slf4j log messages sent to log4j
 	//	runtimeOnly "org.apache.logging.log4j:log4j-slf4j-impl:2.17.1" 
