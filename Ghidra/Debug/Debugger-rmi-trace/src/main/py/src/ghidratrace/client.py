@@ -61,7 +61,7 @@ class Receiver(Thread):
             result = self.client._handle_invoke_method(request)
             Client._write_value(
                 reply.xreply_invoke_method.return_value, result)
-        except Exception as e:
+        except BaseException as e:
             reply.xreply_invoke_method.error = ''.join(
                 traceback.format_exc())
         self.client._send(reply)
@@ -79,7 +79,7 @@ class Receiver(Thread):
                 result = request.handler(
                     getattr(reply, request.field_name))
                 request.set_result(result)
-            except Exception as e:
+            except BaseException as e:
                 request.set_exception(e)
 
     def _recv(self, field_name, handler):
@@ -389,10 +389,10 @@ class Trace(object):
             span = Lifespan(self.snap(), self.snap())
         return self._make_values(self.client._get_values(self.id, span, pattern))
 
-    def get_values_intersecting(self, rng, span=None):
+    def get_values_intersecting(self, rng, span=None, key=""):
         if span is None:
             span = Lifespan(self.snap(), self.snap())
-        return self._make_values(self.client._get_values_intersecting(self.id, span, rng))
+        return self._make_values(self.client._get_values_intersecting(self.id, span, rng, key))
 
     def _activate_object(self, object):
         self.client._activate_object(self.id, object)
@@ -720,7 +720,7 @@ class Client(object):
             return Client._read_obj_desc(msg.child_desc), sch.OBJECT
         raise ValueError("Could not read value: {}".format(msg))
 
-    def __init__(self, s, method_registry: MethodRegistry):
+    def __init__(self, s, description: str, method_registry: MethodRegistry):
         self._traces = {}
         self._next_trace_id = 1
         self.tlock = Lock()
@@ -732,7 +732,7 @@ class Client(object):
         self.slock = Lock()
         self.receiver.start()
         self._method_registry = method_registry
-        self._negotiate()
+        self.description = self._negotiate(description)
 
     def close(self):
         self.s.close()
@@ -1053,11 +1053,12 @@ class Client(object):
             return self._read_values(reply)
         return self._batch_or_now(root, 'reply_get_values', _handle)
 
-    def _get_values_intersecting(self, id, span, rng):
+    def _get_values_intersecting(self, id, span, rng, key):
         root = bufs.RootMessage()
         root.request_get_values_intersecting.oid.id = id
         self._write_span(root.request_get_values_intersecting.box.span, span)
         self._write_range(root.request_get_values_intersecting.box.range, rng)
+        root.request_get_values_intersecting.key = key
 
         def _handle(reply):
             return self._read_values(reply)
@@ -1082,15 +1083,16 @@ class Client(object):
             return reply.length
         return self._batch_or_now(root, 'reply_disassemble', _handle)
 
-    def _negotiate(self):
+    def _negotiate(self, description: str):
         root = bufs.RootMessage()
         root.request_negotiate.version = VERSION
+        root.request_negotiate.description = description
         self._write_methods(root.request_negotiate.methods,
                             self._method_registry._methods.values())
 
         def _handle(reply):
-            pass
-        self._now(root, 'reply_negotiate', _handle)
+            return reply.description
+        return self._now(root, 'reply_negotiate', _handle)
 
     def _handle_invoke_method(self, request):
         if request.HasField('oid'):
